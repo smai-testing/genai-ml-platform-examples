@@ -1,5 +1,2 @@
-aws-cdk-lib
+sagemaker==2.257.0
 boto3
-constructs
-yamldataclassconfig
-python-dotenv
