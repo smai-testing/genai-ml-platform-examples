@@ -7,8 +7,11 @@ def get_pipeline(
     base_job_prefix="BankMarketing",
     bucket_kms_id=None,
     sagemaker_session=None,
+    sagemaker_project_arn=None,
     glue_database_name=None,
     glue_table_name=None,
+    mlflow_tracking_uri=None,
+    mlflow_experiment_name="BankMarketingExperiment",
 ):
     """Gets a SageMaker ML Pipeline instance working with bank marketing data.
 
@@ -31,6 +34,7 @@ def get_pipeline(
         ModelMetrics,
     )
     from sagemaker.processing import (
+        FrameworkProcessor,
         ProcessingInput,
         ProcessingOutput,
         ScriptProcessor,
@@ -54,6 +58,11 @@ def get_pipeline(
         TrainingStep,
     )
     from sagemaker.workflow.step_collections import RegisterModel
+    from sagemaker.workflow.pipeline_context import PipelineSession
+    
+    # Ensure we have a PipelineSession (required for step_args pattern)
+    if sagemaker_session is None or not isinstance(sagemaker_session, PipelineSession):
+        sagemaker_session = PipelineSession(default_bucket=default_bucket)
     
     # Parameters for pipeline execution
     processing_instance_type = ParameterString(
@@ -74,62 +83,62 @@ def get_pipeline(
     glue_table = ParameterString(
         name="GlueTable", default_value=glue_table_name
     )
+    mlflow_tracking_uri_param = ParameterString(
+        name="MLflowTrackingUri", default_value=mlflow_tracking_uri or ""
+    )
+    mlflow_experiment_name_param = ParameterString(
+        name="MLflowExperimentName", default_value=mlflow_experiment_name or "BankMarketingExperiment"
+    )
+    mlflow_parent_run_id = ParameterString(
+        name="MLflowParentRunId", default_value=""
+    )
     
-    # Create a ScriptProcessor for data preprocessing with requirements.txt
-    script_processor = ScriptProcessor(
-        image_uri=sagemaker.image_uris.retrieve(
-            framework="sklearn",
-            region=region,
-            version="1.0-1",
-            py_version="py3",
-            instance_type="ml.m5.xlarge",
-        ),
+    # Create FrameworkProcessor for data preprocessing (supports source_dir + requirements.txt)
+    sklearn_processor = FrameworkProcessor(
+        estimator_cls=sagemaker.sklearn.estimator.SKLearn,
+        framework_version="1.4-2",
         instance_type=processing_instance_type,
         instance_count=processing_instance_count,
-        base_job_name=f"{base_job_prefix}/requirements-preprocess",
-        command=["python3"],
+        base_job_name=f"{base_job_prefix}/sklearn-preprocess",
         sagemaker_session=sagemaker_session,
         role=role,
         output_kms_key=bucket_kms_id,
+        env={
+            "MLFLOW_TRACKING_URI": mlflow_tracking_uri_param,
+            "MLFLOW_EXPERIMENT_NAME": mlflow_experiment_name_param,
+            "MLFLOW_PARENT_RUN_ID": mlflow_parent_run_id
+        }
     )
     
     # Processing step using AWS Data Wrangler with requirements.txt
-    step_process = ProcessingStep(
-        name="PreprocessBankMarketingData",
-        processor=script_processor,
-        inputs=[
-            # Add requirements.txt as an input
-            ProcessingInput(
-                source=f"s3://{default_bucket}/SMUSMLOPS/requirements-preprocess/input/dependencies/",
-                destination="/opt/ml/processing/input/requirements",
-                input_name="requirements"
-            )
-        ],
+    step_process_args = sklearn_processor.run(
         outputs=[
             ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
             ProcessingOutput(output_name="validation", source="/opt/ml/processing/validation"),
             ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
+            ProcessingOutput(output_name="mlflow", source="/opt/ml/processing/mlflow"),
         ],
-        code="source_scripts/preprocessing/prepare_bank_data/main.py",
-        job_arguments=[
+        code="main.py",
+        source_dir="source_scripts/preprocessing/prepare_bank_data",
+        arguments=[
             "--database-name", glue_database,
             "--table-name", glue_table
         ],
     )
-
-    # training step for generating model artifacts
-    model_path = f"s3://{default_bucket}/{base_job_prefix}/BankMarketingTrain"
-
-    image_uri = sagemaker.image_uris.retrieve(
-        framework="xgboost",
-        region=region,
-        version="1.0-1",
-        py_version="py3",
-        instance_type="ml.m5.xlarge",
+    step_process = ProcessingStep(
+        name="PreprocessBankMarketingData",
+        step_args=step_process_args,
     )
 
-    xgb_train = Estimator(
-        image_uri=image_uri,
+    # training step for generating model artifacts using script-mode XGBoost with MLflow
+    model_path = f"s3://{default_bucket}/{base_job_prefix}/BankMarketingTrain"
+
+    from sagemaker.xgboost.estimator import XGBoost
+
+    xgb_train = XGBoost(
+        entry_point="train.py",
+        source_dir="source_scripts/training/xgboost",
+        framework_version="1.7-1",
         instance_type=training_instance_type,
         instance_count=1,
         output_path=model_path,
@@ -137,16 +146,20 @@ def get_pipeline(
         sagemaker_session=sagemaker_session,
         role=role,
         output_kms_key=bucket_kms_id,
-    )
-    xgb_train.set_hyperparameters(
-        objective="binary:logistic",
-        num_round=100,
-        max_depth=5,
-        eta=0.2,
-        gamma=4,
-        min_child_weight=6,
-        subsample=0.8,
-        silent=0,
+        hyperparameters={
+            "max_depth": 5,
+            "eta": 0.2,
+            "gamma": 4,
+            "min_child_weight": 6,
+            "subsample": 0.8,
+            "num_round": 100,
+            "objective": "binary:logistic",
+        },
+        environment={
+            "MLFLOW_TRACKING_URI": mlflow_tracking_uri_param,
+            "MLFLOW_EXPERIMENT_NAME": mlflow_experiment_name_param,
+            "MLFLOW_PARENT_RUN_ID": mlflow_parent_run_id,
+        },
     )
     step_train = TrainingStep(
         name="TrainBankMarketingModel",
@@ -160,28 +173,35 @@ def get_pipeline(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs["validation"].S3Output.S3Uri,
                 content_type="text/csv",
             ),
+            "mlflow": TrainingInput(
+                s3_data=step_process.properties.ProcessingOutputConfig.Outputs["mlflow"].S3Output.S3Uri,
+                content_type="text/plain",
+            ),
         },
     )
 
-    # processing step for evaluation
-    script_eval = ScriptProcessor(
-        image_uri=image_uri,
-        command=["python3"],
+    # FrameworkProcessor for evaluation (supports source_dir + requirements.txt)
+    sklearn_eval = FrameworkProcessor(
+        estimator_cls=sagemaker.sklearn.estimator.SKLearn,
+        framework_version="1.4-2",
         instance_type=processing_instance_type,
         instance_count=1,
-        base_job_name=f"{base_job_prefix}/script-bank-marketing-eval",
+        base_job_name=f"{base_job_prefix}/sklearn-eval",
         sagemaker_session=sagemaker_session,
         role=role,
         output_kms_key=bucket_kms_id,
+        env={
+            "MLFLOW_TRACKING_URI": mlflow_tracking_uri_param,
+            "MLFLOW_EXPERIMENT_NAME": mlflow_experiment_name_param,
+            "MLFLOW_PARENT_RUN_ID": mlflow_parent_run_id
+        }
     )
     evaluation_report = PropertyFile(
         name="BankMarketingEvaluationReport",
         output_name="evaluation",
         path="evaluation.json",
     )
-    step_eval = ProcessingStep(
-        name="EvaluateBankMarketingModel",
-        processor=script_eval,
+    step_eval_args = sklearn_eval.run(
         inputs=[
             ProcessingInput(
                 source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
@@ -191,11 +211,20 @@ def get_pipeline(
                 source=step_process.properties.ProcessingOutputConfig.Outputs["test"].S3Output.S3Uri,
                 destination="/opt/ml/processing/test",
             ),
+            ProcessingInput(
+                source=step_process.properties.ProcessingOutputConfig.Outputs["mlflow"].S3Output.S3Uri,
+                destination="/opt/ml/processing/mlflow",
+            ),
         ],
         outputs=[
             ProcessingOutput(output_name="evaluation", source="/opt/ml/processing/evaluation"),
         ],
-        code="source_scripts/evaluate/evaluate_xgboost/main.py",
+        code="main.py",
+        source_dir="source_scripts/evaluate/evaluate_xgboost",
+    )
+    step_eval = ProcessingStep(
+        name="EvaluateBankMarketingModel",
+        step_args=step_eval_args,
         property_files=[evaluation_report],
     )
 
@@ -248,8 +277,37 @@ def get_pipeline(
             model_approval_status,
             glue_database,
             glue_table,
+            mlflow_tracking_uri_param,
+            mlflow_experiment_name_param,
+            mlflow_parent_run_id,
         ],
         steps=[step_process, step_train, step_eval, step_cond],
         sagemaker_session=sagemaker_session,
     )
     return pipeline
+
+
+def get_pipeline_custom_tags(tags, region, sagemaker_project_arn):
+    """Get custom tags for the pipeline.
+    
+    Args:
+        tags: Existing tags
+        region: AWS region
+        sagemaker_project_arn: SageMaker project ARN
+        
+    Returns:
+        Combined tags
+    """
+    try:
+        # Check if project-name tag already exists
+        existing_keys = {tag.get("Key") for tag in tags}
+        
+        project_name = sagemaker_project_arn.split("/")[-1] if sagemaker_project_arn else ""
+        custom_tags = []
+        
+        if project_name and "sagemaker:project-name" not in existing_keys:
+            custom_tags.append({"Key": "sagemaker:project-name", "Value": project_name})
+        
+        return custom_tags + tags
+    except Exception:
+        return tags

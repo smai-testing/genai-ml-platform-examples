@@ -88,18 +88,18 @@ jobs:
 
     - name: Create Requirements Directory
       run: |
-        mkdir -p source_scripts/preprocessing/prepare_abalone_data/requirements
-        echo "awswrangler==2.16.1" > source_scripts/preprocessing/prepare_abalone_data/requirements/requirements.txt
-        echo "pymysql" >> source_scripts/preprocessing/prepare_abalone_data/requirements/requirements.txt
-        echo "pandas==1.1.3" >> source_scripts/preprocessing/prepare_abalone_data/requirements/requirements.txt
+        mkdir -p source_scripts/preprocessing/prepare_bank_data/requirements
+        echo "awswrangler==2.16.1" > source_scripts/preprocessing/prepare_bank_data/requirements/requirements.txt
+        echo "pymysql" >> source_scripts/preprocessing/prepare_bank_data/requirements/requirements.txt
+        echo "pandas==1.1.3" >> source_scripts/preprocessing/prepare_bank_data/requirements/requirements.txt
     - name: Upload Files to S3
       run: |
         # Upload dataset
         python ./ml_pipelines/data/upload_s3_util.py --s3_bucket ${{secrets.ARTIFACT_BUCKET}}
         
         # Upload requirements and code
-        aws s3 cp source_scripts/preprocessing/prepare_abalone_data/main.py s3://${{secrets.ARTIFACT_BUCKET}}/SMUSMLOPS/requirements-preprocess/input/code/main.py
-        aws s3 cp --recursive source_scripts/preprocessing/prepare_abalone_data/requirements s3://${{secrets.ARTIFACT_BUCKET}}/SMUSMLOPS/requirements-preprocess/input/dependencies/
+        aws s3 cp source_scripts/preprocessing/prepare_bank_data/main.py s3://${{secrets.ARTIFACT_BUCKET}}/SMUSMLOPS/requirements-preprocess/input/code/main.py
+        aws s3 cp --recursive source_scripts/preprocessing/prepare_bank_data/requirements s3://${{secrets.ARTIFACT_BUCKET}}/SMUSMLOPS/requirements-preprocess/input/dependencies/
     - name: List files in the repository
       run: |
         ls ${{ github.workspace }}

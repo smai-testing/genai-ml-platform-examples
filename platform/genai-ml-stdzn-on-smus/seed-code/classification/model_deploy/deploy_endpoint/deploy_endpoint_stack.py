@@ -31,41 +31,46 @@ import constructs
 from .get_approved_package import get_approved_package
 
 from config.constants import (
-    PROJECT_NAME,
-    PROJECT_ID,
     MODEL_PACKAGE_GROUP_NAME,
     DEPLOY_ACCOUNT,
     DEFAULT_DEPLOYMENT_REGION,
-    ECR_REPO_ARN,
     MODEL_BUCKET_ARN,
-    AMAZON_DATAZONE_DOMAIN,
-    AMAZON_DATAZONE_SCOPENAME,
-    SAGEMAKER_DOMAIN_ARN,
-    AMAZON_DATAZONE_PROJECT
 )
 
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from pathlib import Path
-from yamldataclassconfig import create_file_path_field
-from config.config_mux import StageYamlDataClassConfig
 
 
 @dataclass
-class EndpointConfigProductionVariant(StageYamlDataClassConfig):
+class EndpointConfigProductionVariant:
     """
     Endpoint Config Production Variant Dataclass
-    a dataclass to handle mapping yml file configs to python class for endpoint configs
+    Loads configuration from deploy_config.json
     """
 
     initial_instance_count: float = 1
-    initial_variant_weight: float = 1
-    instance_type: str = "ml.m5.2xlarge"
+    initial_variant_weight: float = 1.0
+    instance_type: str = "ml.m5.large"
     variant_name: str = "AllTraffic"
 
-    FILE_PATH: Path = create_file_path_field(
-        "endpoint-config.yml", path_is_absolute=True
-    )
+    def __post_init__(self):
+        """Load endpoint config from JSON config file"""
+        import json
+        from pathlib import Path
+        
+        # Get the config file path relative to this file's location
+        config_path = Path(__file__).parent.parent / "config" / "deploy_config.json"
+        
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                endpoint_config = config.get('endpoint_config', {})
+                
+                # Override defaults with config values
+                self.initial_instance_count = endpoint_config.get('initial_instance_count', self.initial_instance_count)
+                self.initial_variant_weight = endpoint_config.get('initial_variant_weight', self.initial_variant_weight)
+                self.instance_type = endpoint_config.get('instance_type', self.instance_type)
+                self.variant_name = endpoint_config.get('variant_name', self.variant_name)
 
     def get_endpoint_config_production_variant(self, model_name):
         """
@@ -104,15 +109,7 @@ class DeployEndpointStack(Stack):
 
         super().__init__(scope, id, **kwargs)
 
-        self.environment_name = id.split('-')[1]  # Extract the project ID part
-
-        Tags.of(self).add("sagemaker:project-id", PROJECT_ID)
-        Tags.of(self).add("sagemaker:project-name", PROJECT_NAME)
-        Tags.of(self).add("sagemaker:deployment-stage", Stack.of(self).stack_name)
-        Tags.of(self).add("AmazonDataZoneDomain", AMAZON_DATAZONE_DOMAIN)
-        Tags.of(self).add("AmazonDataZoneScopeName", AMAZON_DATAZONE_SCOPENAME)
-        Tags.of(self).add("sagemaker:domain-arn", SAGEMAKER_DOMAIN_ARN)
-        Tags.of(self).add("AmazonDataZoneProject", AMAZON_DATAZONE_PROJECT)
+        self.environment_name = id
 
         # iam role that would be used by the model endpoint to run the inference
         model_execution_policy = iam.ManagedPolicy(
@@ -146,15 +143,6 @@ class DeployEndpointStack(Stack):
                 ]
             ),
         )
-
-        if ECR_REPO_ARN:
-            model_execution_policy.add_statements(
-                iam.PolicyStatement(
-                    actions=["ecr:Get*"],
-                    effect=iam.Effect.ALLOW,
-                    resources=[ECR_REPO_ARN],
-                )
-            )
 
         model_execution_role = iam.Role(
             self,
@@ -196,8 +184,6 @@ class DeployEndpointStack(Stack):
 
         endpoint_config_production_variant = EndpointConfigProductionVariant()
 
-        endpoint_config_production_variant.load_for_stack(self)
-
         # create kms key to be used by the assets bucket
         kms_key = kms.Key(
             self,
@@ -216,8 +202,8 @@ class DeployEndpointStack(Stack):
             ),
         )
 
-        # Define endpoint name first (needed for data capture config)
-        endpoint_name = f"{MODEL_PACKAGE_GROUP_NAME}-{AMAZON_DATAZONE_PROJECT}-{AMAZON_DATAZONE_SCOPENAME}"
+        # Define endpoint name
+        endpoint_name = f"{MODEL_PACKAGE_GROUP_NAME}-endpoint"
 
         endpoint_config = sagemaker.CfnEndpointConfig(
             self,
@@ -228,20 +214,7 @@ class DeployEndpointStack(Stack):
                 endpoint_config_production_variant.get_endpoint_config_production_variant(
                     model.model_name
                 )
-            ],
-            data_capture_config=sagemaker.CfnEndpointConfig.DataCaptureConfigProperty(
-                enable_capture=True,
-                initial_sampling_percentage=100,
-                destination_s3_uri=f"s3://sagemaker-model-monitor-{DEPLOY_ACCOUNT}-{self.region}-{self.environment_name}/data-capture",
-                capture_options=[
-                    sagemaker.CfnEndpointConfig.CaptureOptionProperty(capture_mode="Input"),
-                    sagemaker.CfnEndpointConfig.CaptureOptionProperty(capture_mode="Output")
-                ],
-                capture_content_type_header=sagemaker.CfnEndpointConfig.CaptureContentTypeHeaderProperty(
-                    csv_content_types=["text/csv"],
-                    json_content_types=["application/json"]
-                )
-            )
+            ]
         )
 
         endpoint_config.add_depends_on(model)
