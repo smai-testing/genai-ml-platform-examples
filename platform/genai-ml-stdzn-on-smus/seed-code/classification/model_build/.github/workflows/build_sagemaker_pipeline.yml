@@ -120,6 +120,7 @@ jobs:
         GLUE_TABLE: ${{ secrets.GLUE_TABLE }}
       run: |
         export PYTHONUNBUFFERED=TRUE
+        export PYTHONPATH="${{ github.workspace }}:${PYTHONPATH}"
         export SAGEMAKER_PROJECT_NAME_ID="${SAGEMAKER_PROJECT_NAME}-${SAGEMAKER_PROJECT_ID}"
         export PIPELINE_NAME="githubactions-${SAGEMAKER_PROJECT_ID}"
         
