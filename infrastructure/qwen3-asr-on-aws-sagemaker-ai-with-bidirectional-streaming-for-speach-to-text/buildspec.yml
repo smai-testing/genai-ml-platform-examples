@@ -8,6 +8,11 @@ env:
 phases:
   pre_build:
     commands:
+      - |
+        if [ -n "$DOCKERHUB_TOKEN" ]; then
+          echo "Logging in to Docker Hub..."
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+        fi
       - echo Logging in to Amazon ECR...
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - REGION=$AWS_DEFAULT_REGION
