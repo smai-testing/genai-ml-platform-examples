@@ -35,6 +35,13 @@ from config.constants import (
     DEPLOY_ACCOUNT,
     DEFAULT_DEPLOYMENT_REGION,
     MODEL_BUCKET_ARN,
+    SAGEMAKER_PROJECT_NAME,
+    SAGEMAKER_PROJECT_ID,
+    AMAZON_DATAZONE_DOMAIN,
+    AMAZON_DATAZONE_SCOPENAME,
+    AMAZON_DATAZONE_PROJECT,
+    SAGEMAKER_DOMAIN_ARN,
+    SAGEMAKER_SPACE_ARN,
 )
 
 from datetime import datetime, timezone
@@ -231,3 +238,17 @@ class DeployEndpointStack(Stack):
 
         self.endpoint = endpoint
         self.endpoint_name = endpoint_name
+
+        # Apply SageMaker Unified Studio / DataZone tags to all resources
+        tag_map = {
+            "sagemaker:project-name": SAGEMAKER_PROJECT_NAME,
+            "sagemaker:project-id": SAGEMAKER_PROJECT_ID,
+            "AmazonDataZoneDomain": AMAZON_DATAZONE_DOMAIN,
+            "AmazonDataZoneScopeName": AMAZON_DATAZONE_SCOPENAME,
+            "AmazonDataZoneProject": AMAZON_DATAZONE_PROJECT,
+            "sagemaker:domain-arn": SAGEMAKER_DOMAIN_ARN,
+            "sagemaker:space-arn": SAGEMAKER_SPACE_ARN,
+        }
+        for key, value in tag_map.items():
+            if value:
+                Tags.of(self).add(key, value)
