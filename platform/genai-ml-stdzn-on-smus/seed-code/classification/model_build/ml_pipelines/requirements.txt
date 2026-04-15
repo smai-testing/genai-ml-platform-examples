@@ -1,3 +1,4 @@
 awscli
 boto3
-sagemaker
+sagemaker==v2.257.0
+pytz

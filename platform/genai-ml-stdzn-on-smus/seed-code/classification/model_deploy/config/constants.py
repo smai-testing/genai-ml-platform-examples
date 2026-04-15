@@ -15,23 +15,26 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-import boto3
+import json
 import os
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()  # take environment variables from GitHub Action
+# Load configuration from JSON file
+config_path = Path(__file__).parent / "deploy_config.json"
+with open(config_path, 'r') as f:
+    config = json.load(f)
 
-DEFAULT_DEPLOYMENT_REGION = os.getenv("AWS_REGION")
+DEFAULT_DEPLOYMENT_REGION = config.get("aws_region")
+DEPLOY_ACCOUNT = os.environ.get("DEPLOY_ACCOUNT") or config.get("deploy_account")
+MODEL_PACKAGE_GROUP_NAME = os.environ.get("MODEL_PACKAGE_GROUP_NAME") or config.get("model_package_group_name")
+ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET") or config.get("DataBucketName")
+MODEL_BUCKET_ARN = f"arn:aws:s3:::{ARTIFACT_BUCKET}" if ARTIFACT_BUCKET else "*"
 
-DEPLOY_ACCOUNT = os.getenv("DEPLOY_ACCOUNT")
-
-PROJECT_NAME = os.getenv("SAGEMAKER_PROJECT_NAME")
-PROJECT_ID = os.getenv("SAGEMAKER_PROJECT_ID")
-MODEL_PACKAGE_GROUP_NAME = os.getenv("MODEL_PACKAGE_GROUP_NAME")
-ARTIFACT_BUCKET = os.getenv("ARTIFACT_BUCKET")
-MODEL_BUCKET_ARN = f"arn:aws:s3:::{ARTIFACT_BUCKET}"
-ECR_REPO_ARN = os.getenv("ECR_REPO_ARN")
-AMAZON_DATAZONE_DOMAIN = os.getenv("AMAZON_DATAZONE_DOMAIN")
-AMAZON_DATAZONE_SCOPENAME = os.getenv("AMAZON_DATAZONE_SCOPENAME")
-SAGEMAKER_DOMAIN_ARN = os.getenv("SAGEMAKER_DOMAIN_ARN")
-AMAZON_DATAZONE_PROJECT = os.getenv("AMAZON_DATAZONE_PROJECT")
+# DataZone / SageMaker Unified Studio tags
+SAGEMAKER_PROJECT_NAME = os.environ.get("SAGEMAKER_PROJECT_NAME", "")
+SAGEMAKER_PROJECT_ID = os.environ.get("SAGEMAKER_PROJECT_ID", "")
+AMAZON_DATAZONE_DOMAIN = os.environ.get("AMAZON_DATAZONE_DOMAIN", "")
+AMAZON_DATAZONE_SCOPENAME = os.environ.get("AMAZON_DATAZONE_SCOPENAME", "")
+AMAZON_DATAZONE_PROJECT = os.environ.get("AMAZON_DATAZONE_PROJECT", "")
+SAGEMAKER_DOMAIN_ARN = os.environ.get("SAGEMAKER_DOMAIN_ARN", "")
+SAGEMAKER_SPACE_ARN = os.environ.get("SAGEMAKER_SPACE_ARN", "")

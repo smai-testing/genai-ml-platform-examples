@@ -17,13 +17,9 @@
 
 from aws_cdk import App, Environment
 from deploy_endpoint.deploy_endpoint_stack import DeployEndpointStack
-from deploy_endpoint.cloudwatch_monitoring_stack import CloudWatchMonitoringStack
-from deploy_endpoint.model_quality_monitor_stack import ModelQualityMonitorStack
 from config.constants import (
     DEPLOY_ACCOUNT,
     DEFAULT_DEPLOYMENT_REGION,
-    AMAZON_DATAZONE_SCOPENAME,
-    AMAZON_DATAZONE_PROJECT
 )
 
 
@@ -36,34 +32,8 @@ dev_env = Environment(
 
 endpoint_stack = DeployEndpointStack(
     app, 
-    f"sagemaker-{AMAZON_DATAZONE_PROJECT}", 
+    "sagemaker-endpoint-stack", 
     env=dev_env
 )
-
-# Add CloudWatch monitoring stack
-cloudwatch_stack = CloudWatchMonitoringStack(
-    app,
-    f"sagemaker-{AMAZON_DATAZONE_PROJECT}-cloudwatch-monitoring",
-    endpoint_name=endpoint_stack.endpoint_name,
-    monitoring_config={
-        "MODEL_TYPE": "default",
-        "monitoring_job_name_prefix": "model-quality-job",
-        "schedule_expression": "cron(0 */6 * * ? *)",
-        "instance_count": 1,
-        "instance_type": "ml.m5.xlarge",
-        "max_runtime_seconds": 3600
-    },
-    env=dev_env
-)
-cloudwatch_stack.add_dependency(endpoint_stack)
-
-# Add Model Quality monitoring stack
-model_quality_stack = ModelQualityMonitorStack(
-    app,
-    f"sagemaker-{AMAZON_DATAZONE_PROJECT}-model-quality-monitoring",
-    endpoint_name=endpoint_stack.endpoint_name,
-    env=dev_env
-)
-model_quality_stack.add_dependency(endpoint_stack)
 
 app.synth()

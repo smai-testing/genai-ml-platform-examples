@@ -15,8 +15,7 @@ model_deploy/
 │   └── endpoint-config.yml            # Endpoint configuration
 ├── deploy_endpoint/                    # Core deployment logic
 │   ├── deploy_endpoint_stack.py       # CDK deployment stack
-│   ├── get_approved_package.py        # Model package discovery
-│   └── utils.py                       # Deployment utilities
+│   └── get_approved_package.py        # Model package discovery
 ├── tests/                             # Testing framework
 │   ├── integration_tests/             # Integration tests
 │   └── unittests/                     # Unit tests
@@ -57,29 +56,35 @@ This repository handles steps 10-12 of the AIOps workflow, focusing on the model
 
 ## Configuration Requirements
 
+### Configuration File
+All deployment settings are managed in `config/deploy_config.json`:
+
+```json
+{
+  "aws_region": "us-east-1",              // AWS region for deployment
+  "deploy_account": "123456789012",       // AWS account ID
+  "model_package_group_name": "bank-model-group",  // Model Registry group
+  "DataBucketName": "my-artifacts-bucket",         // S3 bucket for models
+  "endpoint_config": {
+    "initial_instance_count": 1,          // Number of instances
+    "initial_variant_weight": 1.0,        // Traffic weight
+    "instance_type": "ml.m5.large",       // Instance type
+    "variant_name": "AllTraffic"          // Variant name
+  }
+}
+```
+
+**Required Parameters:**
+- `aws_region`: AWS region for deployment
+- `deploy_account`: AWS account ID
+- `model_package_group_name`: Model Registry group name (must have approved models)
+- `DataBucketName`: S3 bucket containing model artifacts
+- `endpoint_config`: Endpoint instance configuration
+
 ### Required GitHub Secrets
-Configure in repository Settings → Secrets and variables → Actions:
+Only one secret is needed for GitHub Actions authentication:
 
 - `OIDC_ROLE_GITHUB_WORKFLOW`: IAM role ARN for GitHub Actions authentication
-- `SAGEMAKER_PIPELINE_ROLE_ARN`: IAM role for SageMaker operations
-- `SAGEMAKER_PROJECT_NAME`: SageMaker project name
-- `SAGEMAKER_PROJECT_ID`: Unique SageMaker project identifier
-- `REGION`: AWS region for endpoint deployment
-- `ARTIFACT_BUCKET`: S3 bucket for deployment artifacts
-- `MODEL_PACKAGE_GROUP_NAME`: Model Registry package group name
-
-### Deployment-Specific Configuration:
-
-The endpoint configuration is managed through the `config/dev/endpoint-config.yml` file:
-
-```yaml
-# Example endpoint configuration
-endpoint_name: "smus-abalone-endpoint"
-instance_type: "ml.t2.medium"
-instance_count: 1
-variant_name: "AllTraffic"
-initial_weight: 1
-```
 ## Model Deployment Process
 
 There are two methods to deploy models using this repository:
@@ -135,15 +140,12 @@ When a model is approved:
    ```
 
 2. **Configure deployment**:
-   - Update `config/dev/endpoint-config.yml` with your settings
+   - Update `config/deploy_config.json` with your settings
    - Ensure AWS credentials are configured
 
-3. **Run deployment locally**:
+3. **Deploy the stack**:
    ```bash
-   python deploy_endpoint/deploy.py \
-     --model-package-group-name <MODEL_PACKAGE_GROUP_NAME> \
-     --endpoint-name <ENDPOINT_NAME> \
-     --region <REGION>
+   cdk deploy
    ```
 
 ### Endpoint Monitoring:
@@ -151,8 +153,8 @@ When a model is approved:
 # Check endpoint status
 aws sagemaker describe-endpoint --endpoint-name <endpoint-name>
 
-# View endpoint metrics
-aws logs describe-log-groups --log-group-name-prefix /aws/sagemaker/Endpoints
+# View endpoint metrics in CloudWatch console
+# Navigate to: CloudWatch → Metrics → SageMaker → Endpoint Metrics
 
 # List recent deployments
 aws sagemaker list-endpoints --sort-by CreationTime --sort-order Descending
