@@ -76,6 +76,11 @@ if __name__ == "__main__":
         pathlib.Path(f"{base_dir}/test").mkdir(parents=True, exist_ok=True)
 
         try:
+
+        
+            """ 
+            *** We are subscribing to S3 iceberg table and need to use pyiceberg to read *** 
+
             logger.info(f"Getting table location for {args.database_name}.{args.table_name}")
             s3_location = wr.catalog.get_table_location(
                 database=args.database_name,
@@ -92,6 +97,26 @@ if __name__ == "__main__":
                 boto3_session=boto3_session
             )
             logger.info(f"Successfully read {len(df)} rows from S3")
+            """
+
+            logger.info(f"Getting table location for {args.database_name}.{args.table_name}")
+
+            import pandas as pd
+            from pyiceberg.catalog import load_catalog
+
+            catalog = load_catalog(
+                "glue",
+                **{
+                    "type": "glue",
+                    "region_name": region,
+                }
+            )
+            table_identifier = f"{args.database_name}.{args.table_name}"
+            logger.info(f"Loading Iceberg table: {table_identifier}")
+            table = catalog.load_table(table_identifier)
+            df = table.scan().to_pandas()
+            
+            logger.info(f"Successfully read {len(df)} rows from S3 iceberg table")
 
         except Exception as e:
             logger.error(f"Error reading from Glue catalog: {e}")

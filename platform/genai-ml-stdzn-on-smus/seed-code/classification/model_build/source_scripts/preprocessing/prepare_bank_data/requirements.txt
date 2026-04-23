@@ -3,3 +3,4 @@ sagemaker-mlflow
 boto3
 awswrangler==2.16.1
 pymysql
+pyiceberg[glue]>=0.7.0
