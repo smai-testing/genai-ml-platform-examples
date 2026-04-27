@@ -25,7 +25,16 @@ with open(config_path, 'r') as f:
     config = json.load(f)
 
 DEFAULT_DEPLOYMENT_REGION = config.get("aws_region")
-DEPLOY_ACCOUNT = config.get("deploy_account")
-MODEL_PACKAGE_GROUP_NAME = config.get("model_package_group_name")
-ARTIFACT_BUCKET = config.get("DataBucketName")
-MODEL_BUCKET_ARN = f"arn:aws:s3:::{ARTIFACT_BUCKET}" if ARTIFACT_BUCKET else ""
+DEPLOY_ACCOUNT = os.environ.get("DEPLOY_ACCOUNT") or config.get("deploy_account")
+MODEL_PACKAGE_GROUP_NAME = os.environ.get("MODEL_PACKAGE_GROUP_NAME") or config.get("model_package_group_name")
+ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET") or config.get("DataBucketName")
+MODEL_BUCKET_ARN = f"arn:aws:s3:::{ARTIFACT_BUCKET}" if ARTIFACT_BUCKET else "*"
+
+# DataZone / SageMaker Unified Studio tags
+SAGEMAKER_PROJECT_NAME = os.environ.get("SAGEMAKER_PROJECT_NAME", "")
+SAGEMAKER_PROJECT_ID = os.environ.get("SAGEMAKER_PROJECT_ID", "")
+AMAZON_DATAZONE_DOMAIN = os.environ.get("AMAZON_DATAZONE_DOMAIN", "")
+AMAZON_DATAZONE_SCOPENAME = os.environ.get("AMAZON_DATAZONE_SCOPENAME", "")
+AMAZON_DATAZONE_PROJECT = os.environ.get("AMAZON_DATAZONE_PROJECT", "")
+SAGEMAKER_DOMAIN_ARN = os.environ.get("SAGEMAKER_DOMAIN_ARN", "")
+SAGEMAKER_SPACE_ARN = os.environ.get("SAGEMAKER_SPACE_ARN", "")

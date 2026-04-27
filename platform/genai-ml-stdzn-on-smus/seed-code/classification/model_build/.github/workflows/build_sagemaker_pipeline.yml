@@ -7,16 +7,6 @@ run-name: ${{ github.actor }} is building in SMUS
 
 on:
   workflow_dispatch:
-    inputs:
-      logLevel:
-        description: 'Log level'
-        required: true
-        default: 'warning'
-        type: choice
-        options:
-          - info
-          - warning
-          - debug
   push:
     branches: [ main ]
     paths:
@@ -118,18 +108,19 @@ jobs:
         SAGEMAKER_PIPELINE_ROLE_ARN: ${{ secrets.SAGEMAKER_PIPELINE_ROLE_ARN }}
         GLUE_DATABASE: ${{ secrets.GLUE_DATABASE }}
         GLUE_TABLE: ${{ secrets.GLUE_TABLE }}
+        MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
       run: |
         export PYTHONUNBUFFERED=TRUE
         export PYTHONPATH="${{ github.workspace }}:${PYTHONPATH}"
         export SAGEMAKER_PROJECT_NAME_ID="${SAGEMAKER_PROJECT_NAME}-${SAGEMAKER_PROJECT_ID}"
-        export PIPELINE_NAME="githubactions-${SAGEMAKER_PROJECT_ID}"
+        export PIPELINE_NAME="bank-marketing-${SAGEMAKER_PROJECT_ID}"
         
         echo "=== Starting Glue Catalog Pipeline ==="
         python ./ml_pipelines/run_pipeline.py \
           --module-name training.pipeline \
           --role-arn "${SAGEMAKER_PIPELINE_ROLE_ARN}" \
           --tags '[{"Key":"sagemaker:project-name", "Value":"'"${SAGEMAKER_PROJECT_NAME}"'"}, {"Key":"sagemaker:project-id", "Value":"'"${SAGEMAKER_PROJECT_ID}"'"}, {"Key":"AmazonDataZoneDomain", "Value":"'"${AMAZON_DATAZONE_DOMAIN}"'"}, {"Key":"AmazonDataZoneScopeName", "Value":"'"${AMAZON_DATAZONE_SCOPENAME}"'"}, {"Key":"sagemaker:domain-arn", "Value":"'"${SAGEMAKER_DOMAIN_ARN}"'"}, {"Key":"sagemaker:space-arn", "Value":"'"${SAGEMAKER_SPACE_ARN}"'"}, {"Key":"AmazonDataZoneProject", "Value":"'"${AMAZON_DATAZONE_PROJECT}"'"}]' \
-          --kwargs '{"region":"'"${REGION}"'","role":"'"${SAGEMAKER_PIPELINE_ROLE_ARN}"'","default_bucket":"'"${ARTIFACT_BUCKET}"'","pipeline_name":"'"${PIPELINE_NAME}"'","model_package_group_name":"'"${MODEL_PACKAGE_GROUP_NAME}"'","base_job_prefix":"SMUSMLOPS","glue_database_name":"'"${GLUE_DATABASE}"'","glue_table_name":"'"${GLUE_TABLE}"'"}'
+          --kwargs '{"region":"'"${REGION}"'","role":"'"${SAGEMAKER_PIPELINE_ROLE_ARN}"'","default_bucket":"'"${ARTIFACT_BUCKET}"'","pipeline_name":"'"${PIPELINE_NAME}"'","model_package_group_name":"'"${MODEL_PACKAGE_GROUP_NAME}"'","base_job_prefix":"SMUSMLOPS","glue_database_name":"'"${GLUE_DATABASE}"'","glue_table_name":"'"${GLUE_TABLE}"'","mlflow_tracking_uri":"'"${MLFLOW_TRACKING_URI}"'"}'
         
         echo "Pipeline started successfully. Pipeline name: ${PIPELINE_NAME}"
         
@@ -138,7 +129,7 @@ jobs:
         REGION: ${{ secrets.REGION }}
         SAGEMAKER_PROJECT_ID: ${{ secrets.SAGEMAKER_PROJECT_ID }}
       run: |
-        export PIPELINE_NAME="githubactions-${SAGEMAKER_PROJECT_ID}"
+        export PIPELINE_NAME="bank-marketing-${SAGEMAKER_PROJECT_ID}"
         
         echo "=== Monitoring Pipeline Execution ==="
         echo "Pipeline Name: ${PIPELINE_NAME}"
@@ -238,3 +229,12 @@ jobs:
         exit 1
         
     - run: echo "This github action job's status is ${{ job.status }}."
+
+    - name: Set Model Lifecycle Stage
+      env:
+        REGION: ${{ secrets.REGION }}
+        MODEL_PACKAGE_GROUP_NAME: ${{ secrets.MODEL_PACKAGE_GROUP_NAME }}
+        SAGEMAKER_PROJECT_ID: ${{ secrets.SAGEMAKER_PROJECT_ID }}
+      run: |
+        export PIPELINE_NAME="bank-marketing-${SAGEMAKER_PROJECT_ID}"
+        python ./ml_pipelines/set_model_lifecycle.py

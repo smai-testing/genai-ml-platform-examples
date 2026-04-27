@@ -8,7 +8,7 @@ on:
     branches:
       - main
     paths:
-      - model_deploy/config/deploy_config.json
+      - config/deploy_config.json
   workflow_dispatch:
     inputs:
       model_package_group_name:
@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 env:
-  CONFIG_FILE: model_deploy/config/deploy_config.json
+  CONFIG_FILE: config/deploy_config.json
 
 jobs:
   GitHub-Actions-Deploy:
@@ -55,10 +55,11 @@ jobs:
 
     - name: Load Configuration
       id: load_config
+      env:
+        MODEL_PACKAGE_GROUP_NAME: ${{ secrets.MODEL_PACKAGE_GROUP_NAME }}
       run: |
         AWS_REGION=$(jq -r '.aws_region' ${{ env.CONFIG_FILE }})
         DEPLOY_ACCOUNT=$(jq -r '.deploy_account' ${{ env.CONFIG_FILE }})
-        MODEL_PACKAGE_GROUP_NAME=$(jq -r '.model_package_group_name' ${{ env.CONFIG_FILE }})
         DATA_BUCKET_NAME=$(jq -r '.DataBucketName' ${{ env.CONFIG_FILE }})
         
         echo "aws_region=$AWS_REGION" >> $GITHUB_OUTPUT
@@ -73,30 +74,52 @@ jobs:
           aws-region: ${{ steps.load_config.outputs.aws_region }}
 
     - name: Install dependencies
-      working-directory: model_deploy
       run: |
         sh install-prerequisites-brew.sh
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
                  
     - name: CDK Synth
-      working-directory: model_deploy
+      env:
+        MODEL_PACKAGE_GROUP_NAME: ${{ secrets.MODEL_PACKAGE_GROUP_NAME }}
+        MODEL_PACKAGE_ARN: ${{ github.event.inputs.model_package_arn || secrets.MODEL_PACKAGE_ARN }}
+        DEPLOY_ACCOUNT: ${{ secrets.DEPLOY_ACCOUNT }}
+        ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+        SAGEMAKER_PROJECT_NAME: ${{ secrets.SAGEMAKER_PROJECT_NAME }}
+        SAGEMAKER_PROJECT_ID: ${{ secrets.SAGEMAKER_PROJECT_ID }}
+        AMAZON_DATAZONE_DOMAIN: ${{ secrets.AMAZON_DATAZONE_DOMAIN }}
+        AMAZON_DATAZONE_SCOPENAME: ${{ secrets.AMAZON_DATAZONE_SCOPENAME }}
+        AMAZON_DATAZONE_PROJECT: ${{ secrets.AMAZON_DATAZONE_PROJECT }}
+        SAGEMAKER_DOMAIN_ARN: ${{ secrets.SAGEMAKER_DOMAIN_ARN }}
+        SAGEMAKER_SPACE_ARN: ${{ secrets.SAGEMAKER_SPACE_ARN }}
       run: |
         cdk synth --no-lookups 
         
     - name: Check and Create Bootstrap
-      working-directory: model_deploy
       env:
         AWS_REGION: ${{ steps.load_config.outputs.aws_region }}
-        DEPLOY_ACCOUNT: ${{ steps.load_config.outputs.deploy_account }}
+        DEPLOY_ACCOUNT: ${{ secrets.DEPLOY_ACCOUNT }}
         OIDC_ROLE_GITHUB_WORKFLOW: ${{secrets.OIDC_ROLE_GITHUB_WORKFLOW}}
         CDK_QUALIFIER: "gitactions"
+        MODEL_PACKAGE_GROUP_NAME: ${{ secrets.MODEL_PACKAGE_GROUP_NAME }}
+        MODEL_PACKAGE_ARN: ${{ github.event.inputs.model_package_arn || secrets.MODEL_PACKAGE_ARN }}
+        ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+        SAGEMAKER_PROJECT_NAME: ${{ secrets.SAGEMAKER_PROJECT_NAME }}
+        SAGEMAKER_PROJECT_ID: ${{ secrets.SAGEMAKER_PROJECT_ID }}
+        AMAZON_DATAZONE_DOMAIN: ${{ secrets.AMAZON_DATAZONE_DOMAIN }}
+        AMAZON_DATAZONE_SCOPENAME: ${{ secrets.AMAZON_DATAZONE_SCOPENAME }}
+        AMAZON_DATAZONE_PROJECT: ${{ secrets.AMAZON_DATAZONE_PROJECT }}
+        SAGEMAKER_DOMAIN_ARN: ${{ secrets.SAGEMAKER_DOMAIN_ARN }}
+        SAGEMAKER_SPACE_ARN: ${{ secrets.SAGEMAKER_SPACE_ARN }}
       run: |
         # Validate ARN format
         if [[ ! "${OIDC_ROLE_GITHUB_WORKFLOW}" =~ ^arn:aws:iam::[0-9]{12}:role/ ]]; then
           echo "Error: OIDC_ROLE_GITHUB_WORKFLOW must be a valid IAM role ARN"
           exit 1
         fi
+        
+        echo "DEPLOY_ACCOUNT is set: $([ -n "${DEPLOY_ACCOUNT}" ] && echo 'YES' || echo 'NO - empty!')"
+        echo "AWS_REGION: ${AWS_REGION}"
         
         STACK_EXISTS=$(aws cloudformation list-stacks \
           --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
@@ -115,9 +138,19 @@ jobs:
         fi
           
     - name: CDK Deploy
-      working-directory: model_deploy
       env:
         CDK_QUALIFIER: "gitactions"
+        MODEL_PACKAGE_GROUP_NAME: ${{ secrets.MODEL_PACKAGE_GROUP_NAME }}
+        MODEL_PACKAGE_ARN: ${{ github.event.inputs.model_package_arn || secrets.MODEL_PACKAGE_ARN }}
+        DEPLOY_ACCOUNT: ${{ secrets.DEPLOY_ACCOUNT }}
+        ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+        SAGEMAKER_PROJECT_NAME: ${{ secrets.SAGEMAKER_PROJECT_NAME }}
+        SAGEMAKER_PROJECT_ID: ${{ secrets.SAGEMAKER_PROJECT_ID }}
+        AMAZON_DATAZONE_DOMAIN: ${{ secrets.AMAZON_DATAZONE_DOMAIN }}
+        AMAZON_DATAZONE_SCOPENAME: ${{ secrets.AMAZON_DATAZONE_SCOPENAME }}
+        AMAZON_DATAZONE_PROJECT: ${{ secrets.AMAZON_DATAZONE_PROJECT }}
+        SAGEMAKER_DOMAIN_ARN: ${{ secrets.SAGEMAKER_DOMAIN_ARN }}
+        SAGEMAKER_SPACE_ARN: ${{ secrets.SAGEMAKER_SPACE_ARN }}
       run: |
         cdk deploy \
           --require-approval never \
@@ -126,8 +159,4 @@ jobs:
           --verbose
 
   
-    - name: CDK list
-      working-directory: model_deploy
-      run: |
-        cdk list 
     - run: echo "This github action job's status is ${{ job.status }}."
