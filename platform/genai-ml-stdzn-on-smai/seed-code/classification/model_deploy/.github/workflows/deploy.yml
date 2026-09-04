@@ -1,6 +1,8 @@
-# This workflow will get the approved model from model registry and deploy to dev, pre-prod and prod
+# This workflow gets the approved model from the model registry and deploys its
+# endpoint. The repository holds one folder per model under models/, so the
+# workflow first works out which model it is being asked to deploy.
 
-name: Sagemaker Model Deploy Pipeline 
+name: Sagemaker Model Deploy Pipeline
 run-name: ${{ github.actor }} is deploying a new model to SageMaker
 
 on:
@@ -8,9 +10,13 @@ on:
     branches:
       - main
     paths:
-      - model_deploy/config/deploy_config.json
+      - models/*/config/deploy_config.json
   workflow_dispatch:
     inputs:
+      model_name:
+        description: 'Folder name under models/ to deploy. Sent by the project Lambda.'
+        required: false
+        type: string
       model_package_group_name:
         description: 'Model Package Group Name'
         required: false
@@ -33,21 +39,88 @@ permissions:
   id-token: write
   contents: read
 
-env:
-  CONFIG_FILE: model_deploy/config/deploy_config.json
-
 jobs:
-  GitHub-Actions-Deploy:
-
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.pick.outputs.models }}
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Work out which model to deploy
+        id: pick
+        env:
+          MODEL_NAME_INPUT: ${{ inputs.model_name }}
+          MPG_INPUT: ${{ inputs.model_package_group_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          THIS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          MODEL=""
+          if [ -n "${MODEL_NAME_INPUT:-}" ]; then
+            MODEL="$MODEL_NAME_INPUT"
+          elif [ -n "${MPG_INPUT:-}" ]; then
+            # Older callers only send the model package group. The project
+            # template names it <model-name>-model-group, so strip the suffix.
+            MODEL="${MPG_INPUT%-model-group}"
+          fi
+
+          if [ -n "$MODEL" ]; then
+            if [ ! -d "models/${MODEL}" ]; then
+              echo "models/${MODEL} does not exist in this repository"
+              exit 1
+            fi
+            MODELS=$(jq -nc --arg m "$MODEL" '[$m]')
+          else
+            # Pushed change with no inputs: deploy whatever model folders moved.
+            if [ -z "${BEFORE_SHA:-}" ] \
+               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              CHANGED=$(git show --name-only --pretty=format: "$THIS_SHA")
+            else
+              CHANGED=$(git diff --name-only "$BEFORE_SHA" "$THIS_SHA")
+            fi
+            MODELS=$(printf '%s\n' "$CHANGED" \
+              | sed -n 's|^models/\([^/]*\)/.*|\1|p' \
+              | sort -u \
+              | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+
+          echo "models=$MODELS" >> "$GITHUB_OUTPUT"
+          echo "Models to deploy: $MODELS"
+
+  GitHub-Actions-Deploy:
+    needs: detect
+    if: needs.detect.outputs.models != '[]'
+    runs-on: ubuntu-latest
+
+    strategy:
+      # One model failing should not stop the others.
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(needs.detect.outputs.models) }}
+
+    # Two approvals of the same model must not deploy at the same time, or the
+    # two CDK runs would fight over one CloudFormation stack.
+    concurrency:
+      group: deploy-${{ matrix.model }}
+      cancel-in-progress: false
+
+    env:
+      CONFIG_FILE: models/${{ matrix.model }}/config/deploy_config.json
+
     steps:
     - run: echo "The job was automatically triggered by a ${{ github.event_name }} event."
     - run: echo "This job is now running on a ${{ runner.os }} server hosted by GitHub!"
     - run: echo "The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+    - run: echo "Deploying model ${{ matrix.model }}."
     - env:
         COMMIT_MSG: ${{ github.event.head_commit.message }}
       run: echo "The commit message for the event - $COMMIT_MSG"
-    - uses: actions/checkout@v4
     - name: Check out repository code
       uses: actions/checkout@v4
     - name: Set up Python 3.11
@@ -62,7 +135,7 @@ jobs:
         DEPLOY_ACCOUNT=$(jq -r '.deploy_account' ${{ env.CONFIG_FILE }})
         MODEL_PACKAGE_GROUP_NAME=$(jq -r '.model_package_group_name' ${{ env.CONFIG_FILE }})
         DATA_BUCKET_NAME=$(jq -r '.DataBucketName' ${{ env.CONFIG_FILE }})
-        
+
         echo "aws_region=$AWS_REGION" >> $GITHUB_OUTPUT
         echo "deploy_account=$DEPLOY_ACCOUNT" >> $GITHUB_OUTPUT
         echo "model_package_group_name=$MODEL_PACKAGE_GROUP_NAME" >> $GITHUB_OUTPUT
@@ -75,19 +148,19 @@ jobs:
           aws-region: ${{ steps.load_config.outputs.aws_region }}
 
     - name: Install dependencies
-      working-directory: model_deploy
+      working-directory: models/${{ matrix.model }}
       run: |
         sh install-prerequisites-brew.sh
         python -m pip install --upgrade pip
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-                 
+
     - name: CDK Synth
-      working-directory: model_deploy
+      working-directory: models/${{ matrix.model }}
       run: |
-        cdk synth --no-lookups 
-        
+        cdk synth --no-lookups
+
     - name: Check and Create Bootstrap
-      working-directory: model_deploy
+      working-directory: models/${{ matrix.model }}
       env:
         AWS_REGION: ${{ steps.load_config.outputs.aws_region }}
         DEPLOY_ACCOUNT: ${{ steps.load_config.outputs.deploy_account }}
@@ -99,12 +172,12 @@ jobs:
           echo "Error: OIDC_ROLE_GITHUB_WORKFLOW must be a valid IAM role ARN"
           exit 1
         fi
-        
+
         STACK_EXISTS=$(aws cloudformation list-stacks \
           --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
           --query "StackSummaries[?StackName=='CDKToolkit-${CDK_QUALIFIER}'].StackName" \
           --output text) || true
-        
+
         if [ ! -z "$STACK_EXISTS" ]; then
           echo "Bootstrap stack CDKToolkit-${CDK_QUALIFIER} already exists, proceeding with deployment..."
         else
@@ -113,11 +186,11 @@ jobs:
             --toolkit-stack-name CDKToolkit-${CDK_QUALIFIER} \
             --qualifier ${CDK_QUALIFIER} \
             --trust ${DEPLOY_ACCOUNT} \
-            --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess 
+            --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
         fi
-          
+
     - name: CDK Deploy
-      working-directory: model_deploy
+      working-directory: models/${{ matrix.model }}
       env:
         CDK_QUALIFIER: "gitactions"
       run: |
@@ -127,9 +200,8 @@ jobs:
           --context "@aws-cdk/core:bootstrapQualifier=${CDK_QUALIFIER}" \
           --verbose
 
-  
     - name: CDK list
-      working-directory: model_deploy
+      working-directory: models/${{ matrix.model }}
       run: |
-        cdk list 
+        cdk list
     - run: echo "This github action job's status is ${{ job.status }}."

@@ -7,20 +7,23 @@ SEED_CODE_DIR="$SCRIPT_DIR/classification"
 cd "$SEED_CODE_DIR"
 
 # Create model-build-repo.zip with model_build folder structure
+# zip appends to an existing archive, so remove it first to get a clean build
+rm -f "$SEED_CODE_DIR/model-build-repo.zip"
 rm -rf /tmp/build-pkg
 mkdir -p /tmp/build-pkg
 cp -r model_build /tmp/build-pkg/
 cd /tmp/build-pkg
-zip -r "$SEED_CODE_DIR/model-build-repo.zip" model_build -x "*__pycache__/*" -x "*.pyc"
+zip -r "$SEED_CODE_DIR/model-build-repo.zip" model_build -x "*__pycache__/*" -x "*.pyc" -x "*.DS_Store"
 cd "$SEED_CODE_DIR"
 rm -rf /tmp/build-pkg
 
 # Create model-deploy-repo.zip with model_deploy folder structure
+rm -f "$SEED_CODE_DIR/model-deploy-repo.zip"
 rm -rf /tmp/deploy-pkg
 mkdir -p /tmp/deploy-pkg
 cp -r model_deploy /tmp/deploy-pkg/
 cd /tmp/deploy-pkg
-zip -r "$SEED_CODE_DIR/model-deploy-repo.zip" model_deploy -x "*__pycache__/*" -x "*.pyc"
+zip -r "$SEED_CODE_DIR/model-deploy-repo.zip" model_deploy -x "*__pycache__/*" -x "*.pyc" -x "*.DS_Store"
 cd "$SEED_CODE_DIR"
 rm -rf /tmp/deploy-pkg
 

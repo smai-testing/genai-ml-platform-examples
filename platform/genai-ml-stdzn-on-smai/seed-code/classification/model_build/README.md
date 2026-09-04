@@ -4,10 +4,10 @@ This repository contains the model training pipeline for the SMUS framework. It 
 
 ## Repository Structure
 ```
-model_build/
+models/<model-name>/            # one folder per model in the shared build repo
 ├── README.md                           # This guide
 ├── .github/workflows/                  # GitHub Actions CI/CD
-│   └── build_sagemaker_pipeline.yml    # Main build workflow
+│   └── build.yml                       # Main build workflow, moved to the repo root by setup_workflow.sh
 ├── ml_pipelines/                       # SageMaker Pipeline definitions
 │   ├── run_pipeline.py                 # Pipeline execution script
 │   ├── training/pipeline.py            # Main pipeline definition
@@ -96,7 +96,7 @@ Configure in repository Settings → Secrets and variables → Actions:
 ### Setup Local Environment
 ```bash
 # Clone and setup
-cd model_build
+cd models/<model-name>
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

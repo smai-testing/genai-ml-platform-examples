@@ -7,10 +7,10 @@ This repository contains the model deployment pipeline for the SMUS framework. I
 ## Repository Structure
 
 ```
-model_deploy/
+models/<model-name>/            # one folder per model in the shared deploy repo
 ├── README.md                           # This guide
 ├── .github/workflows/                  # GitHub Actions CI/CD
-│   └── deploy_model_pipeline.yml      # Main deployment workflow
+│   └── deploy.yml                     # Main deployment workflow, moved to the repo root by setup_workflow.sh
 ├── config/dev/                        # Configuration management
 │   └── endpoint-config.yml            # Endpoint configuration
 ├── deploy_endpoint/                    # Core deployment logic
@@ -133,7 +133,7 @@ When a model is approved:
 
 1. **Clone and setup environment**:
    ```bash
-   cd model_deploy
+   cd models/<model-name>
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt

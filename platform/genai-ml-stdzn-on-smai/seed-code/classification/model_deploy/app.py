@@ -20,8 +20,15 @@ from deploy_endpoint.deploy_endpoint_stack import DeployEndpointStack
 from config.constants import (
     DEPLOY_ACCOUNT,
     DEFAULT_DEPLOYMENT_REGION,
+    MODEL_PACKAGE_GROUP_NAME,
 )
 
+
+if not MODEL_PACKAGE_GROUP_NAME:
+    raise ValueError(
+        "model_package_group_name is empty in config/deploy_config.json. "
+        "The project template fills this in when it seeds the model folder."
+    )
 
 app = App()
 
@@ -30,9 +37,12 @@ dev_env = Environment(
     region=DEFAULT_DEPLOYMENT_REGION
 )
 
+# One stack per model. Both mono-repos hold many models, and two models
+# deploying into the same account must not share a stack name or the second
+# one would tear down the first one's endpoint.
 endpoint_stack = DeployEndpointStack(
-    app, 
-    "sagemaker-endpoint-stack", 
+    app,
+    f"sagemaker-endpoint-{MODEL_PACKAGE_GROUP_NAME}",
     env=dev_env
 )
 
