@@ -1,0 +1,16 @@
+#!/bin/bash
+# This folder sits at models/<model-name>/ inside the shared model-deploy repo,
+# so the repository root is two levels up. GitHub only runs workflows that live
+# at the repository root, which is why the file has to be lifted out of here.
+ROOT=../..
+
+mkdir -p "$ROOT/.github/workflows"
+
+if [ -f "$ROOT/.github/workflows/deploy.yml" ]; then
+  echo "deploy.yml is already at the repository root - an earlier model set it up."
+  rm -rf .github
+else
+  mv .github/workflows/deploy.yml "$ROOT/.github/workflows/"
+  rm -rf .github
+  echo "GitHub workflow moved to repository root!"
+fi

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'S3-based MLOps template for Bank Marketing Classification using SageMaker and GitHub Actions with Glue Catalog integration'
+Description: 'S3-based MLOps template for classification models. Adds one folder per model to a shared model-build and model-deploy repository, using SageMaker, GitHub Actions and Glue Catalog integration'
 
 Parameters:
   SageMakerProjectName:
@@ -23,6 +23,16 @@ Parameters:
     MaxLength: 48
     AllowedPattern: ^[a-z0-9]+(-[a-z0-9]+)*$
     ConstraintDescription: lowercase letters, numbers and single hyphens only
+
+  SeedCodeKind:
+    Type: String
+    Description: >-
+      Which starter code to copy into this model's folder. Each value matches a
+      folder of seed code, so a new kind of model needs no template change.
+    Default: classification
+    AllowedValues:
+      - classification
+      - churn
 
   ModelBuildCodeRepositoryFullname:
     Type: String
@@ -48,7 +58,7 @@ Parameters:
 
   SeedCodeBucketName:
     Type: String
-    Description: S3 bucket name where seed code resides (classification-model-repo.zip)
+    Description: S3 bucket name holding the seed code zips (<kind>-model-build-repo.zip and <kind>-model-deploy-repo.zip)
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -59,6 +69,7 @@ Metadata:
           - SageMakerProjectName
           - SageMakerProjectId
           - ModelName
+          - SeedCodeKind
       - Label:
           default: "GitHub Repository Configuration"
         Parameters:
@@ -207,10 +218,6 @@ Resources:
         EnvironmentVariables:
           - Name: SeedCodeBucket
             Value: !Ref SeedCodeBucketName
-          - Name: ModelBuildSeedCode
-            Value: classification-model-build-repo.zip
-          - Name: ModelDeploySeedCode
-            Value: classification-model-deploy-repo.zip
           - Name: SourceModelBuildCodeRepositoryBranch
             Value: main
           - Name: SourceModelDeployCodeRepositoryBranch
@@ -302,6 +309,8 @@ Resources:
           MODEL_DEPLOY_REPO: !Ref ModelDeployCodeRepositoryFullname
           CODE_CONNECTION_ARN: !Ref CodeConnectionArn
           SEED_CODE_BUCKET: !Ref SeedCodeBucketName
+          SEED_BUILD_ZIP: !Sub ${SeedCodeKind}-model-build-repo.zip
+          SEED_DEPLOY_ZIP: !Sub ${SeedCodeKind}-model-deploy-repo.zip
       Code:
         ZipFile: |
           import boto3
@@ -339,7 +348,7 @@ Resources:
                   ],
                   secondarySourcesOverride=[
                     {
-                      'location': f'{os.environ["SEED_CODE_BUCKET"]}/classification-model-build-repo.zip',
+                      'location': f'{os.environ["SEED_CODE_BUCKET"]}/{os.environ["SEED_BUILD_ZIP"]}',
                       'type': 'S3',
                       'sourceIdentifier': 'source'
                     }
@@ -358,7 +367,7 @@ Resources:
                   ],
                   secondarySourcesOverride=[
                     {
-                      'location': f'{os.environ["SEED_CODE_BUCKET"]}/classification-model-deploy-repo.zip',
+                      'location': f'{os.environ["SEED_CODE_BUCKET"]}/{os.environ["SEED_DEPLOY_ZIP"]}',
                       'type': 'S3',
                       'sourceIdentifier': 'source'
                     }
@@ -408,3 +417,7 @@ Outputs:
   ModelFolder:
     Description: Folder added to both mono-repos for this model
     Value: !Sub models/${ModelName}
+
+  SeedCodeKindUsed:
+    Description: Starter code copied into that folder
+    Value: !Ref SeedCodeKind
