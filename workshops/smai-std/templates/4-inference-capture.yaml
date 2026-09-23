@@ -1,0 +1,600 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Inference-capture data plane for the workshop endpoint. Stands up the SQS +
+  Lambda pipeline that records every real-time prediction into an Athena
+  Iceberg table so Lab 5 drift/monitoring notebooks have inference data to
+  analyse.
+
+  Flow:  Endpoint inference handler  --(1 SQS message / prediction)-->  SQS
+         queue  --(batch, 10 / 30s)-->  logger Lambda  -->  Athena INSERT
+         into  <AthenaDatabase>.<InferenceTableName>  (Iceberg).
+
+  This stack is deployed AFTER the main workshop stack (main.yaml) and is
+  designed to be wired in when Lab 2 (data prep) and Lab 3 (model build/deploy)
+  are updated: Lab 3's deploy step sets the endpoint container env var
+  SQS_QUEUE_URL to this stack's InferenceCaptureQueueUrl output, and grants the
+  endpoint execution role the SqsSendPolicy exported here.
+
+  CloudFormation cannot create Iceberg tables natively, so a custom-resource
+  Lambda runs the CREATE TABLE DDL via Athena. The table is NOT dropped on
+  stack delete (captured inference data is preserved).
+
+# ===========================================================================
+# Parameters
+# ===========================================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Must match the ProjectName used in the main workshop stack.'
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: 'ProjectName must contain only lowercase letters, numbers, and hyphens'
+
+  DataBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      S3 bucket for Athena query results and Iceberg table data. Leave blank to
+      use the main stack's data bucket (<ProjectName>-data-<AccountId>-<Region>).
+
+  AthenaDatabase:
+    Type: String
+    Default: 'bank_marketing'
+    Description: >-
+      Glue/Athena database that holds the bank-marketing Iceberg tables. This is
+      the same database the Lab 2 registration notebook writes training_data /
+      evaluation_data into (source of truth); this stack creates it if absent and
+      adds the inference table. Use underscores (Athena Iceberg friendly), not hyphens.
+    AllowedPattern: '^[a-z0-9_]+$'
+    ConstraintDescription: 'Database name must contain only lowercase letters, numbers, and underscores'
+
+  InferenceTableName:
+    Type: String
+    Default: 'inference_responses'
+    Description: 'Athena Iceberg table the logger Lambda INSERTs predictions into.'
+    AllowedPattern: '^[a-z0-9_]+$'
+
+  EndpointExecutionRoleNames:
+    Type: CommaDelimitedList
+    Default: ''
+    Description: >-
+      Names of the SageMaker execution roles to grant sqs:SendMessage on the
+      capture queue (comma-delimited). When deployed via main.yaml this is set
+      to the workshop's product/userA/userB roles automatically. Leave blank
+      for standalone deploys — the SqsSendPolicy is still created and exported
+      so you can attach it later.
+
+  LogRetentionInDays:
+    Type: Number
+    Default: 14
+    Description: 'CloudWatch Logs retention for the logger Lambda.'
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+Conditions:
+  DeriveBucketName: !Equals [!Ref DataBucketName, '']
+  # CommaDelimitedList default '' parses to [''] — Select 0 is '' when unset.
+  AttachToRole: !Not [!Equals [!Select [0, !Ref EndpointExecutionRoleNames], '']]
+
+Resources:
+  # =========================================================================
+  # Glue database for the Iceberg inference table
+  # =========================================================================
+  MonitoringGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref AthenaDatabase
+        Description: 'Inference-capture Iceberg tables for Lab 5 monitoring'
+        LocationUri: !If
+          - DeriveBucketName
+          - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/${AthenaDatabase}/'
+          - !Sub 's3://${DataBucketName}/${AthenaDatabase}/'
+
+  # =========================================================================
+  # SQS — inference-capture queue (+ dead-letter queue)
+  # The endpoint inference handler sends one message per prediction; the
+  # logger Lambda below drains it into the Iceberg table.
+  # =========================================================================
+  InferenceCaptureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-inference-capture-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InferenceCaptureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-inference-capture'
+      # Must exceed the logger Lambda timeout (120s) so in-flight batches are
+      # not redelivered while still being processed.
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 86400  # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InferenceCaptureDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Logger Lambda — drains SQS -> INSERT INTO Athena inference table
+  # =========================================================================
+  InferenceLoggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-inference-logger-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonAthenaFullAccess'
+      Policies:
+        - PolicyName: DataBucketAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: !If
+                  - DeriveBucketName
+                  - - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}'
+                    - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/*'
+                  - - !Sub 'arn:aws:s3:::${DataBucketName}'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:UpdateTable'
+                Resource: '*'
+
+  InferenceLoggerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ProjectName}-inference-logger'
+      RetentionInDays: !Ref LogRetentionInDays
+
+  InferenceLoggerFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: InferenceLoggerLogGroup
+    Properties:
+      FunctionName: !Sub '${ProjectName}-inference-logger'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 120
+      MemorySize: 256
+      Role: !GetAtt InferenceLoggerRole.Arn
+      Description: 'Drains the inference-capture SQS queue into the Athena inference table.'
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref AthenaDatabase
+          ATHENA_TABLE: !Ref InferenceTableName
+          ATHENA_OUTPUT_S3: !If
+            - DeriveBucketName
+            - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/athena-query-results/'
+            - !Sub 's3://${DataBucketName}/athena-query-results/'
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import time
+          import boto3
+
+          ATHENA_DATABASE = os.environ['ATHENA_DATABASE']
+          ATHENA_TABLE = os.environ['ATHENA_TABLE']
+          ATHENA_OUTPUT_S3 = os.environ['ATHENA_OUTPUT_S3']
+
+          # (column, athena_type) — order defines the INSERT column list.
+          # Feature values are stored as a JSON string in input_features so the
+          # table is decoupled from the model's exact feature engineering
+          # (which Lab 2 / Lab 3 own and may change).
+          COLUMNS = [
+              ('inference_id', 'varchar'), ('request_timestamp', 'timestamp'),
+              ('endpoint_name', 'varchar'), ('model_version', 'varchar'),
+              ('mlflow_run_id', 'varchar'), ('input_features', 'varchar'),
+              ('prediction', 'integer'), ('probability_positive', 'double'),
+              ('probability_negative', 'double'), ('confidence_score', 'double'),
+              ('ground_truth', 'integer'), ('ground_truth_timestamp', 'timestamp'),
+              ('ground_truth_source', 'varchar'), ('days_to_ground_truth', 'double'),
+              ('inference_latency_ms', 'double'), ('model_load_time_ms', 'double'),
+              ('preprocessing_time_ms', 'double'), ('client_id', 'varchar'),
+              ('is_high_confidence', 'boolean'), ('is_low_confidence', 'boolean'),
+              ('prediction_bucket', 'varchar'), ('request_id', 'varchar'),
+              ('response_time', 'timestamp'), ('error_message', 'varchar'),
+              ('inference_mode', 'varchar'), ('monitoring_run_id', 'varchar'),
+          ]
+
+          def sql_val(v, col_type):
+              """Render one Python value as an Athena SQL literal."""
+              if v is None:
+                  return f"CAST(NULL AS {col_type})"
+              if isinstance(v, bool):
+                  return str(v).lower()
+              if isinstance(v, (int, float)):
+                  return str(v)
+              s = str(v)
+              if col_type == 'timestamp' and len(s) >= 19 and s[4] == '-':
+                  return f"TIMESTAMP '{s.replace('T', ' ')}'"
+              # single-quote escape
+              return "'" + s.replace(chr(39), chr(39) + chr(39)) + "'"
+
+          def lambda_handler(event, context):
+              athena = boto3.client('athena')
+              records = []
+              for r in event.get('Records', []):
+                  try:
+                      records.append(json.loads(r['body']))
+                  except Exception as e:
+                      print(f"Skipping unparseable message: {e}")
+              if not records:
+                  return {'statusCode': 200, 'body': 'No records'}
+
+              rows = []
+              for r in records:
+                  row = ", ".join(sql_val(r.get(c), t) for c, t in COLUMNS)
+                  rows.append(f"({row})")
+
+              col_list = ", ".join(c for c, _ in COLUMNS)
+              query = (
+                  f"INSERT INTO {ATHENA_DATABASE}.{ATHENA_TABLE} ({col_list})\n"
+                  "VALUES\n" + ",\n".join(rows)
+              )
+
+              resp = athena.start_query_execution(
+                  QueryString=query,
+                  QueryExecutionContext={'Database': ATHENA_DATABASE},
+                  ResultConfiguration={'OutputLocation': ATHENA_OUTPUT_S3},
+              )
+              qid = resp['QueryExecutionId']
+              print(f"Athena query started: {qid} ({len(records)} rows)")
+
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)
+                  state = status['QueryExecution']['Status']['State']
+                  if state in ('SUCCEEDED', 'FAILED', 'CANCELLED'):
+                      break
+                  time.sleep(0.5)
+
+              if state != 'SUCCEEDED':
+                  reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+                  # Raise so the batch returns to the queue and is retried
+                  # (then dead-lettered after maxReceiveCount).
+                  raise Exception(f"Athena INSERT failed ({state}): {reason}")
+
+              print(f"Inserted {len(records)} rows into {ATHENA_DATABASE}.{ATHENA_TABLE}")
+              return {'statusCode': 200, 'body': f'Inserted {len(records)} records'}
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InferenceLoggerEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt InferenceCaptureQueue.Arn
+      FunctionName: !Ref InferenceLoggerFunction
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 30
+
+  # =========================================================================
+  # Custom resource — create the Iceberg inference table via Athena DDL
+  # =========================================================================
+  TableCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-inference-table-creator-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonAthenaFullAccess'
+      Policies:
+        - PolicyName: S3AndGlueAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: !If
+                  - DeriveBucketName
+                  - - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}'
+                    - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/*'
+                  - - !Sub 'arn:aws:s3:::${DataBucketName}'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:CreateTable'
+                  - 'glue:UpdateTable'
+                  - 'glue:DeleteTable'
+                Resource: '*'
+
+  TableCreatorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-inference-table-creator'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      Role: !GetAtt TableCreatorRole.Arn
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref AthenaDatabase
+          ATHENA_TABLE: !Ref InferenceTableName
+          TABLE_LOCATION: !If
+            - DeriveBucketName
+            - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/${AthenaDatabase}/${InferenceTableName}/'
+            - !Sub 's3://${DataBucketName}/${AthenaDatabase}/${InferenceTableName}/'
+          # Lab 5 monitoring tables. Created here (in the deploy-workshop.sh
+          # stack) rather than in a notebook — notebooks only WRITE rows.
+          # monitoring_responses: drift-run results read by QuickSight (Drift
+          #   dataset) and written directly by the lab5d notebook code.
+          # ground_truth_updates: label backfills read by QuickSight (accuracy
+          #   timeline) and written by the in-notebook ground-truth simulator.
+          MONITORING_TABLE: 'monitoring_responses'
+          MONITORING_TABLE_LOCATION: !If
+            - DeriveBucketName
+            - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/${AthenaDatabase}/monitoring_responses/'
+            - !Sub 's3://${DataBucketName}/${AthenaDatabase}/monitoring_responses/'
+          GROUND_TRUTH_UPDATES_TABLE: 'ground_truth_updates'
+          GROUND_TRUTH_UPDATES_LOCATION: !If
+            - DeriveBucketName
+            - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/${AthenaDatabase}/ground_truth_updates/'
+            - !Sub 's3://${DataBucketName}/${AthenaDatabase}/ground_truth_updates/'
+          ATHENA_OUTPUT_S3: !If
+            - DeriveBucketName
+            - !Sub 's3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/athena-query-results/'
+            - !Sub 's3://${DataBucketName}/athena-query-results/'
+      Code:
+        ZipFile: |
+          import os
+          import time
+          import boto3
+          import cfnresponse
+
+          athena = boto3.client('athena')
+          DATABASE = os.environ['ATHENA_DATABASE']
+          TABLE = os.environ['ATHENA_TABLE']
+          TABLE_LOCATION = os.environ['TABLE_LOCATION']
+          MONITORING_TABLE = os.environ['MONITORING_TABLE']
+          MONITORING_TABLE_LOCATION = os.environ['MONITORING_TABLE_LOCATION']
+          GROUND_TRUTH_UPDATES_TABLE = os.environ['GROUND_TRUTH_UPDATES_TABLE']
+          GROUND_TRUTH_UPDATES_LOCATION = os.environ['GROUND_TRUTH_UPDATES_LOCATION']
+          ATHENA_OUTPUT_S3 = os.environ['ATHENA_OUTPUT_S3']
+
+          INFERENCE_DDL = f"""
+              CREATE TABLE IF NOT EXISTS {DATABASE}.{TABLE} (
+                  inference_id STRING,
+                  request_timestamp TIMESTAMP,
+                  endpoint_name STRING,
+                  model_version STRING,
+                  mlflow_run_id STRING,
+                  input_features STRING,
+                  prediction INT,
+                  probability_positive DOUBLE,
+                  probability_negative DOUBLE,
+                  confidence_score DOUBLE,
+                  ground_truth INT,
+                  ground_truth_timestamp TIMESTAMP,
+                  ground_truth_source STRING,
+                  days_to_ground_truth DOUBLE,
+                  inference_latency_ms DOUBLE,
+                  model_load_time_ms DOUBLE,
+                  preprocessing_time_ms DOUBLE,
+                  client_id STRING,
+                  is_high_confidence BOOLEAN,
+                  is_low_confidence BOOLEAN,
+                  prediction_bucket STRING,
+                  request_id STRING,
+                  response_time TIMESTAMP,
+                  error_message STRING,
+                  inference_mode STRING,
+                  monitoring_run_id STRING
+              )
+              LOCATION '{TABLE_LOCATION}'
+              TBLPROPERTIES ('table_type' = 'ICEBERG')
+          """
+
+          # Drift-run results. Written directly by the lab5d notebook code
+          # (no drift Lambda / SQS) and read by QuickSight's Drift dataset and
+          # by the MLflow performance report. Column list MUST match the
+          # INSERT in lab5d cell 5.4 AND the QuickSight dataset schema in
+          # src/governance/create_governance_dashboard.py (create_drift_dataset).
+          MONITORING_DDL = f"""
+              CREATE TABLE IF NOT EXISTS {DATABASE}.{MONITORING_TABLE} (
+                  monitoring_run_id STRING,
+                  monitoring_timestamp TIMESTAMP,
+                  endpoint_name STRING,
+                  model_version STRING,
+                  model_package_arn STRING,
+                  evaluation_snapshot_id STRING,
+                  training_snapshot_id STRING,
+                  data_drift_detected BOOLEAN,
+                  drifted_columns_count INT,
+                  drifted_columns_share DOUBLE,
+                  features_analyzed INT,
+                  data_sample_size INT,
+                  model_drift_detected BOOLEAN,
+                  baseline_roc_auc DOUBLE,
+                  current_roc_auc DOUBLE,
+                  roc_auc_degradation DOUBLE,
+                  roc_auc_degradation_pct DOUBLE,
+                  accuracy DOUBLE,
+                  precision DOUBLE,
+                  recall DOUBLE,
+                  f1_score DOUBLE,
+                  model_sample_size INT,
+                  per_feature_drift_scores STRING,
+                  evidently_report_s3_path STRING,
+                  mlflow_run_id STRING,
+                  alert_sent BOOLEAN,
+                  detection_engine STRING,
+                  created_at TIMESTAMP
+              )
+              LOCATION '{MONITORING_TABLE_LOCATION}'
+              TBLPROPERTIES ('table_type' = 'ICEBERG')
+          """
+
+          # Ground-truth label backfills. Written by the in-notebook
+          # ground-truth simulator (src/drift_monitoring/simulate_ground_truth_from_athena.py)
+          # and read by update_ground_truth.py + QuickSight's accuracy timeline
+          # (join with inference_responses on inference_id). Column list MUST
+          # match the simulator's create_ground_truth_updates() dataframe.
+          # client_id = schema identifier; actual_subscribed = bank-marketing target.
+          GROUND_TRUTH_UPDATES_DDL = f"""
+              CREATE TABLE IF NOT EXISTS {DATABASE}.{GROUND_TRUTH_UPDATES_TABLE} (
+                  client_id STRING,
+                  inference_id STRING,
+                  actual_subscribed BOOLEAN,
+                  confirmation_timestamp TIMESTAMP,
+                  confirmation_source STRING,
+                  transaction_timestamp TIMESTAMP,
+                  prediction_timestamp TIMESTAMP,
+                  days_since_transaction DOUBLE,
+                  days_since_prediction DOUBLE,
+                  investigation_notes STRING,
+                  investigation_priority STRING,
+                  false_positive BOOLEAN,
+                  false_negative BOOLEAN,
+                  window_id INT,
+                  batch_id STRING,
+                  created_at TIMESTAMP,
+                  updated_at TIMESTAMP
+              )
+              LOCATION '{GROUND_TRUTH_UPDATES_LOCATION}'
+              TBLPROPERTIES ('table_type' = 'ICEBERG')
+          """
+
+          def run_query(sql):
+              resp = athena.start_query_execution(
+                  QueryString=sql,
+                  QueryExecutionContext={'Database': DATABASE},
+                  ResultConfiguration={'OutputLocation': ATHENA_OUTPUT_S3},
+              )
+              qid = resp['QueryExecutionId']
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)
+                  state = status['QueryExecution']['Status']['State']
+                  if state in ('SUCCEEDED', 'FAILED', 'CANCELLED'):
+                      break
+                  time.sleep(2)
+              if state != 'SUCCEEDED':
+                  reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+                  raise Exception(f'Query failed ({state}): {reason}')
+
+          def handler(event, context):
+              try:
+                  # Never drop the tables on delete — captured data is preserved.
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  for name, ddl in (
+                      (TABLE, INFERENCE_DDL),
+                      (MONITORING_TABLE, MONITORING_DDL),
+                      (GROUND_TRUTH_UPDATES_TABLE, GROUND_TRUTH_UPDATES_DDL),
+                  ):
+                      print(f'Creating Iceberg table {DATABASE}.{name}...')
+                      run_query(ddl)
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS,
+                                   {'Tables': f'{DATABASE}.{{{TABLE}, {MONITORING_TABLE}, {GROUND_TRUTH_UPDATES_TABLE}}}'})
+              except Exception as e:
+                  print(f'Error: {e}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  InferenceTable:
+    Type: Custom::AthenaIcebergTable
+    DependsOn: MonitoringGlueDatabase
+    Properties:
+      ServiceToken: !GetAtt TableCreatorFunction.Arn
+      # Bump this value to force the DDL to re-run on a stack update.
+      # v2: added monitoring_responses + ground_truth_updates tables.
+      # v3: added monitoring_responses.training_snapshot_id.
+      # Note: the DDL is CREATE TABLE IF NOT EXISTS, so re-running it does not
+      # alter a table that already exists. Bumping this only takes effect for
+      # tables that are absent — to apply a column change to a deployed
+      # account, either ALTER TABLE it or drop that one table first.
+      Version: '3'
+
+  # =========================================================================
+  # SQS-send managed policy for the endpoint execution role
+  # The endpoint's inference handler needs sqs:SendMessage to publish
+  # prediction messages. Attached to EndpointExecutionRoleName when provided;
+  # always exported so it can be attached later (e.g. from Lab 3).
+  # =========================================================================
+  # Inline policy (AWS::IAM::Policy), NOT a managed policy: the workshop
+  # execution roles are already at the 10-managed-policies-per-role IAM quota,
+  # and inline policies do not count against that quota. Created only when at
+  # least one role name is supplied.
+  SqsSendPolicy:
+    Type: AWS::IAM::Policy
+    Condition: AttachToRole
+    Properties:
+      PolicyName: !Sub '${ProjectName}-inference-capture-send'
+      Roles: !Ref EndpointExecutionRoleNames
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sqs:SendMessage'
+              - 'sqs:GetQueueUrl'
+              - 'sqs:GetQueueAttributes'
+            Resource: !GetAtt InferenceCaptureQueue.Arn
+
+Outputs:
+  InferenceCaptureQueueUrl:
+    Description: 'SQS queue URL — set as the endpoint container env var SQS_QUEUE_URL in Lab 3.'
+    Value: !Ref InferenceCaptureQueue
+    Export:
+      Name: !Sub '${ProjectName}-inference-capture-queue-url'
+
+  InferenceCaptureQueueArn:
+    Description: 'SQS queue ARN for the inference-capture pipeline.'
+    Value: !GetAtt InferenceCaptureQueue.Arn
+    Export:
+      Name: !Sub '${ProjectName}-inference-capture-queue-arn'
+
+  InferenceCaptureDLQUrl:
+    Description: 'Dead-letter queue URL for failed capture messages.'
+    Value: !Ref InferenceCaptureDLQ
+
+  InferenceLoggerFunctionArn:
+    Description: 'Logger Lambda that writes captured predictions to Athena.'
+    Value: !GetAtt InferenceLoggerFunction.Arn
+
+  GlueDatabaseName:
+    Description: 'Glue/Athena database holding the inference Iceberg table.'
+    Value: !Ref AthenaDatabase
+    Export:
+      Name: !Sub '${ProjectName}-inference-capture-database'
+
+  InferenceTableName:
+    Description: 'Athena Iceberg table capturing endpoint predictions.'
+    Value: !Sub '${AthenaDatabase}.${InferenceTableName}'
+    Export:
+      Name: !Sub '${ProjectName}-inference-capture-table'

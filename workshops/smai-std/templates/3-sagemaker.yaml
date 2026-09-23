@@ -1,0 +1,556 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  SageMaker stack - Domain, user profiles, MLflow, S3 buckets, Access Grants, Glue catalog,
+  and Lambda functions. Imports from networking and IAM stacks.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name (must be lowercase letters, numbers, and hyphens only)'
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: 'ProjectName must contain only lowercase letters, numbers, and hyphens'
+
+  JupyterLabAppInstance:
+    Type: String
+    Description: Name of an ML instance to run JupyterLab App space
+    Default: 'ml.m5.2xlarge'
+
+  UserAProfileName:
+    Type: String
+    Description: Name for User A profile
+    Default: 'userA'
+
+  UserBProfileName:
+    Type: String
+    Description: Name for User B profile
+    Default: 'userB'
+
+  SeedCodeType:
+    Type: String
+    Description: Type of seed code to use for SageMaker projects
+    Default: 'llm-fine-tuning'
+    AllowedValues:
+      - regression
+      - llm-fine-tuning
+      - classification
+
+Resources:
+  # --- S3 Buckets ---
+  GrantsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-grants-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-data-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - POST
+              - PUT
+              - GET
+              - HEAD
+              - DELETE
+            AllowedOrigins:
+              - "https://*.sagemaker.aws"
+            ExposedHeaders:
+              - ETag
+              - x-amz-delete-marker
+              - x-amz-id-2
+              - x-amz-request-id
+              - x-amz-server-side-encryption
+              - x-amz-version-id
+
+  MLflowArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-mlflow-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSageMakerServiceCatalogCodeBuildAccess
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub '${DataBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: AllowSageMakerServiceCatalogRoleAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub '${DataBucket.Arn}/*'
+            Condition:
+              StringLike:
+                'aws:PrincipalArn': !Sub 'arn:aws:iam::${AWS::AccountId}:role/service-role/AmazonSageMaker*'
+
+  # --- SageMaker Domain & Profiles ---
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      AppNetworkAccessType: VpcOnly
+      AuthMode: IAM
+      DomainSettings:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-SecurityGroupId
+        DockerSettings:
+          EnableDockerAccess: ENABLED
+      DefaultUserSettings:
+        ExecutionRole: !ImportValue
+          Fn::Sub: ${ProjectName}-ProductRoleArn
+        StudioWebPortal: ENABLED
+        DefaultLandingUri: 'studio::'
+      TagPropagation: ENABLED
+      DomainName: !Sub "${ProjectName}-domain"
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-PrivateSubnetId
+        - !ImportValue
+          Fn::Sub: ${ProjectName}-PrivateSubnet2Id
+      VpcId: !ImportValue
+        Fn::Sub: ${ProjectName}-VPCId
+      Tags:
+        - Key: sagemaker:projectS3TemplatesLocation
+          Value: !Sub "s3://${ProjectName}-data-${AWS::AccountId}-${AWS::Region}"
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  SageMakerUserAProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserAProfileName
+      UserSettings:
+        ExecutionRole: !ImportValue
+          Fn::Sub: ${ProjectName}-UserARoleArn
+        SecurityGroups:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-SecurityGroupId
+      Tags:
+        - Key: UserName
+          Value: !Ref UserAProfileName
+
+  SageMakerUserBProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserBProfileName
+      UserSettings:
+        ExecutionRole: !ImportValue
+          Fn::Sub: ${ProjectName}-UserBRoleArn
+        SecurityGroups:
+          - !ImportValue
+            Fn::Sub: ${ProjectName}-SecurityGroupId
+      Tags:
+        - Key: UserName
+          Value: !Ref UserBProfileName
+
+  JupyterAppSpace:
+    Type: AWS::SageMaker::Space
+    Properties:
+      DomainId: !GetAtt SageMakerDomain.DomainId
+      OwnershipSettings:
+        OwnerUserProfileName: !Select [2, !Split ["/", !GetAtt SageMakerUserAProfile.UserProfileArn]]
+      SpaceDisplayName: jupyterlab-space
+      SpaceName: usera-jl-space
+      SpaceSettings:
+        AppType: JupyterLab
+        JupyterLabAppSettings:
+          DefaultResourceSpec:
+            InstanceType: !Ref JupyterLabAppInstance
+        SpaceStorageSettings:
+          EbsStorageSettings:
+            EbsVolumeSizeInGb: 50
+      SpaceSharingSettings:
+        SharingType: Private
+
+  # --- MLflow ---
+  MLflowAppResource:
+    Type: AWS::SageMaker::MlflowApp
+    Properties:
+      Name: !Sub '${ProjectName}-mlflow-app'
+      ArtifactStoreUri: !Sub 's3://${MLflowArtifactsBucket}/mlflow-artifacts'
+      # Every mlflow.register_model() call is mirrored into the SageMaker AI
+      # Model Registry as a Model Package, carrying the inference specification
+      # logged on the MLflow model. Lab 3A relies on this: it registers once, in
+      # MLflow, and deploys the synced package. Without it the sync never runs
+      # and the lab has no Model Package to deploy or to hang its drift baseline
+      # on. The app role (2-iam.yaml MLflowAppRole) holds the
+      # CreateModelPackage* permissions the sync needs.
+      ModelRegistrationMode: AutoModelRegistrationEnabled
+      RoleArn: !ImportValue
+        Fn::Sub: ${ProjectName}-MLflowRoleArn
+      Tags:
+        - Key: StackName
+          Value: !Ref AWS::StackName
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  # --- S3 Access Grants ---
+  AccessGrantsInstance:
+    Type: AWS::S3::AccessGrantsInstance
+
+  AccessGrantsLocation:
+    Type: AWS::S3::AccessGrantsLocation
+    Properties:
+      IamRoleArn: !ImportValue
+        Fn::Sub: ${ProjectName}-S3AGRoleArn
+      LocationScope: !Sub s3://${GrantsBucket}
+    DependsOn: AccessGrantsInstance
+
+  S3AccessGrantProductReadUserA:
+    Type: AWS::S3::AccessGrant
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'Product/*'
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !ImportValue
+          Fn::Sub: ${ProjectName}-UserARoleArn
+
+  S3AccessGrantProductReadUserB:
+    Type: AWS::S3::AccessGrant
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'Product/*'
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !ImportValue
+          Fn::Sub: ${ProjectName}-UserBRoleArn
+
+  S3AccessGrantUserASpace:
+    Type: AWS::S3::AccessGrant
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'UserA/*'
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !ImportValue
+          Fn::Sub: ${ProjectName}-UserARoleArn
+
+  S3AccessGrantUserBSpace:
+    Type: AWS::S3::AccessGrant
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'UserB/*'
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !ImportValue
+          Fn::Sub: ${ProjectName}-UserBRoleArn
+
+  # --- Glue Data Catalog ---
+  BankClassificationGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: bank-classification-db
+        Description: Database for bank marketing campaign classification data
+
+  BankMarketingGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref BankClassificationGlueDatabase
+      TableInput:
+        Name: bank-marketing-data
+        Description: Bank marketing campaign dataset for classification
+        StorageDescriptor:
+          Columns:
+            - Name: age
+              Type: int
+            - Name: job
+              Type: string
+            - Name: marital
+              Type: string
+            - Name: education
+              Type: string
+            - Name: default
+              Type: string
+            - Name: balance
+              Type: int
+            - Name: housing
+              Type: string
+            - Name: loan
+              Type: string
+            - Name: contact
+              Type: string
+            - Name: day
+              Type: int
+            - Name: month
+              Type: string
+            - Name: duration
+              Type: int
+            - Name: campaign
+              Type: int
+            - Name: pdays
+              Type: int
+            - Name: previous
+              Type: int
+            - Name: poutcome
+              Type: string
+            - Name: "y"
+              Type: string
+          Location: !Sub 's3://${DataBucket}/ml_pipelines/data/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+            Parameters:
+              field.delim: ','
+              skip.header.line.count: '1'
+        TableType: EXTERNAL_TABLE
+
+  # --- Lambda: Copy S3 Files ---
+  CopyS3FilesLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-CopyS3FilesLambda
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: ${ProjectName}-LambdaRoleArn
+      Timeout: 59
+      MemorySize: 255
+      Environment:
+        Variables:
+          SOURCE_BUCKET: 'aws-blogs-artifacts-public'
+          SOURCE_PREFIX: 'ML-16183/abalone.csv'
+          DEST_BUCKET: !Ref GrantsBucket
+          GITHUB_TEMPLATE_URL: 'https://raw.githubusercontent.com/aws-samples/genai-ml-platform-examples/main/platform/genai-ml-stdzn-on-smai/S3_model_build_deploy_template.yaml'
+          GITHUB_CLASSIFICATION_TEMPLATE_URL: 'https://raw.githubusercontent.com/aws-samples/genai-ml-platform-examples/main/platform/genai-ml-stdzn-on-smai/S3_classification_template.yaml'
+          GITHUB_BASE_URL: 'https://raw.githubusercontent.com/aws-samples/genai-ml-platform-examples/main/platform/genai-ml-stdzn-on-smai/seed-code'
+          GITHUB_CLASSIFICATION_BASE_URL: 'https://raw.githubusercontent.com/aws-samples/genai-ml-platform-examples/main/platform/genai-ml-stdzn-on-smai/seed-code'
+          SEED_CODE_TYPE: !Ref SeedCodeType
+          DEST2_BUCKET: !Ref DataBucket
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+          import cfnresponse
+          import urllib.request
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          def lambda_handler(event, context):
+              responseData = {}
+              result = cfnresponse.FAILED
+              try:
+                  if event["RequestType"] == "Delete":
+                      result = cfnresponse.SUCCESS
+                  elif event["RequestType"] == "Create" or event["RequestType"] == "Update":
+                      source_bucket = os.getenv('SOURCE_BUCKET')
+                      dest_bucket = os.getenv('DEST_BUCKET')
+                      source_prefix = os.getenv('SOURCE_PREFIX')
+                      github_base_url = os.getenv('GITHUB_BASE_URL')
+                      github_template_url = os.getenv('GITHUB_TEMPLATE_URL')
+                      github_classification_template_url = os.getenv('GITHUB_CLASSIFICATION_TEMPLATE_URL')
+                      seed_code_type = os.getenv('SEED_CODE_TYPE', 'llm-fine-tuning')
+                      dest2_bucket = os.getenv('DEST2_BUCKET')
+                      s3 = boto3.client('s3')
+                      # Copy abalone data
+                      for key in ['UserA/abalone.csv', 'UserB/abalone.csv', 'Product/abalone.csv']:
+                          s3.copy_object(Bucket=dest_bucket, Key=key, CopySource={'Bucket': source_bucket, 'Key': source_prefix})
+                      # Download and upload templates
+                      for url, key in [(github_template_url, 'S3_model_build_deploy_template.yaml'), (github_classification_template_url, 'S3_classification_template.yaml')]:
+                          with urllib.request.urlopen(url) as response:
+                              s3.put_object(Bucket=dest2_bucket, Key=key, Body=response.read())
+                          s3.put_object_tagging(Bucket=dest2_bucket, Key=key, Tagging={'TagSet': [{'Key': 'sagemaker:studio-visibility', 'Value': 'true'}]})
+                      # Download seed code zips
+                      for code_type in ['llm-fine-tuning', 'classification']:
+                          base = f"{github_base_url}/{code_type}"
+                          prefix = 'classification-' if code_type == 'classification' else ''
+                          for repo in ['model-build-repo.zip', 'model-deploy-repo.zip']:
+                              with urllib.request.urlopen(f"{base}/{repo}") as response:
+                                  s3.put_object(Bucket=dest2_bucket, Key=f"{prefix}{repo}", Body=response.read())
+                      result = cfnresponse.SUCCESS
+                  else:
+                      result = cfnresponse.SUCCESS
+              except Exception as e:
+                  result = cfnresponse.FAILED
+                  responseData = str(e)
+                  logger.error(f"An error occurred: {e}")
+              cfnresponse.send(event, context, result, responseData)
+
+  CopyS3FilesLambdaTrigger:
+    Type: Custom::CopyS3Files
+    Properties:
+      ServiceToken: !GetAtt CopyS3FilesLambdaFunction.Arn
+      Version: '1'
+
+  # --- Lambda: Lifecycle Config ---
+  LifeCycleConfigLambda:
+    DependsOn:
+      - SageMakerUserAProfile
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Add LifeCycle Configuration to copy workshop files to Studio
+      Handler: index.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: ${ProjectName}-LCCLambdaRoleArn
+      Runtime: python3.10
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import base64
+          import cfnresponse
+
+          client = boto3.client('sagemaker')
+          lcc_content = '\n'.join([
+              '#!/bin/bash',
+              '',
+              'set -ex',
+              '',
+              'if [ ! -z "${!SM_JOB_DEF_VERSION}" ]',
+              'then',
+              '   echo "Running in job mode, skip lcc"',
+              'else',
+              '    git clone --depth 1 --filter=blob:none --sparse https://github.com/aws-samples/genai-ml-platform-examples.git temp-repo || { echo "Error: Failed to clone repo"; exit 0; }',
+              '    cd temp-repo',
+              '    git sparse-checkout set platform/genai-ml-stdzn-on-smai',
+              '    cp -r platform/genai-ml-stdzn-on-smai/* ../ 2>/dev/null || cp -r platform/genai-ml-stdzn-on-smai/. ../',
+              '    cd ..',
+              '    rm -rf temp-repo',
+              '    echo "Files cloned from GitHub repository"',
+              'fi',
+              '',
+          ])
+          lcc_name = '${ProjectName}-clone-repo'
+
+          def lambda_handler(event, context):
+              try:
+                  if event.get("RequestType") == "Delete":
+                      try:
+                          client.delete_studio_lifecycle_config(StudioLifecycleConfigName=lcc_name)
+                      except Exception:
+                          pass
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  base64_lcc = base64.b64encode(lcc_content.encode("ascii")).decode("ascii")
+                  response = client.create_studio_lifecycle_config(
+                      StudioLifecycleConfigName=lcc_name,
+                      StudioLifecycleConfigContent=base64_lcc,
+                      StudioLifecycleConfigAppType="JupyterLab",
+                  )
+                  lcc_arn = response["StudioLifecycleConfigArn"]
+                  # Get domain and profile from the user profile ARN
+                  profile_arn = '${SageMakerUserAProfile}'
+                  parts = profile_arn.split('|')
+                  client.update_user_profile(
+                      DomainId=parts[1],
+                      UserProfileName=parts[0],
+                      UserSettings={
+                          "JupyterLabAppSettings": {
+                              "DefaultResourceSpec": {"LifecycleConfigArn": lcc_arn},
+                              "LifecycleConfigArns": [lcc_arn]
+                          }
+                      }
+                  )
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {"Data": "OK"})
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Data": str(e)})
+
+  LifeCycleConfigLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt LifeCycleConfigLambda.Arn
+
+Outputs:
+  SageMakerDomainId:
+    Value: !GetAtt SageMakerDomain.DomainId
+    Description: SageMaker Domain Id
+
+  SageMakerUserAProfileName:
+    Value: !Ref SageMakerUserAProfile
+    Description: SageMaker User A Profile Name
+
+  SageMakerUserBProfileName:
+    Value: !Ref SageMakerUserBProfile
+    Description: SageMaker User B Profile Name
+
+  GrantsBucketName:
+    Value: !Ref GrantsBucket
+    Description: Grants bucket name
+
+  DataBucketName:
+    Value: !Ref DataBucket
+    Description: Data bucket name
+
+  MLflowArtifactsBucketName:
+    Value: !Ref MLflowArtifactsBucket
+    Description: MLflow Artifacts S3 Bucket Name
+
+  MLflowAppArn:
+    Description: ARN of the Serverless MLflow App
+    Value: !GetAtt MLflowAppResource.Arn
+
+  AccessGrantsInstanceArn:
+    Value: !GetAtt AccessGrantsInstance.AccessGrantsInstanceArn
+    Description: Access Grants Instance Arn
+
+  BankClassificationGlueDatabaseName:
+    Value: !Ref BankClassificationGlueDatabase
+    Description: Glue Database name for bank classification
+
+  BankMarketingGlueTableName:
+    Value: !Ref BankMarketingGlueTable
+    Description: Glue Table name for bank marketing data

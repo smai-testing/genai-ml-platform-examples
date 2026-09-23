@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Service Catalog Product - SageMaker Studio Domain.
+  Creates a SageMaker Domain in VPCOnly mode with user profiles, MLflow tracking server,
+  and a data bucket. Depends on networking and roles stacks via CloudFormation exports.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name (must match networking and roles stacks)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+  UserAProfileName:
+    Type: String
+    Default: 'userA'
+    Description: 'Name for User A profile'
+
+  UserBProfileName:
+    Type: String
+    Default: 'userB'
+    Description: 'Name for User B profile'
+
+  JupyterLabAppInstance:
+    Type: String
+    Default: 'ml.m5.2xlarge'
+    Description: 'Instance type for JupyterLab spaces'
+
+Resources:
+  # Data bucket
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-data-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # MLflow artifacts bucket
+  MLflowArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-mlflow-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # SageMaker Domain
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      DomainName: !Sub ${ProjectName}-domain
+      AuthMode: IAM
+      AppNetworkAccessType: VpcOnly
+      TagPropagation: ENABLED
+      DomainSettings:
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${ProjectName}-SecurityGroupId
+        DockerSettings:
+          EnableDockerAccess: ENABLED
+      DefaultUserSettings:
+        ExecutionRole:
+          Fn::ImportValue: !Sub ${ProjectName}-ProductRoleArn
+        StudioWebPortal: ENABLED
+        DefaultLandingUri: 'studio::'
+        SecurityGroups:
+          - Fn::ImportValue: !Sub ${ProjectName}-SecurityGroupId
+      VpcId:
+        Fn::ImportValue: !Sub ${ProjectName}-VpcId
+      SubnetIds:
+        - Fn::ImportValue: !Sub ${ProjectName}-PrivateSubnetId
+        - Fn::ImportValue: !Sub ${ProjectName}-PrivateSubnet2Id
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # User A profile
+  UserAProfile:
+    Type: AWS::SageMaker::UserProfile
+    DependsOn: SageMakerDomain
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserAProfileName
+      UserSettings:
+        ExecutionRole:
+          Fn::ImportValue: !Sub ${ProjectName}-UserARoleArn
+
+  # User B profile
+  UserBProfile:
+    Type: AWS::SageMaker::UserProfile
+    DependsOn: SageMakerDomain
+    Properties:
+      DomainId: !Ref SageMakerDomain
+      UserProfileName: !Ref UserBProfileName
+      UserSettings:
+        ExecutionRole:
+          Fn::ImportValue: !Sub ${ProjectName}-UserBRoleArn
+
+  # MLflow Tracking Server
+  MLflowTrackingServer:
+    Type: AWS::SageMaker::MlflowTrackingServer
+    DependsOn: SageMakerDomain
+    Properties:
+      TrackingServerName: !Sub ${ProjectName}-mlflow
+      ArtifactStoreUri: !Sub s3://${MLflowArtifactsBucket}
+      TrackingServerSize: Small
+      RoleArn:
+        Fn::ImportValue: !Sub ${ProjectName}-ProductRoleArn
+
+Outputs:
+  DomainId:
+    Value: !Ref SageMakerDomain
+    Description: SageMaker Domain ID
+
+  DataBucketName:
+    Value: !Ref DataBucket
+    Description: S3 bucket for workshop data
+
+  MLflowTrackingServerName:
+    Value: !Sub ${ProjectName}-mlflow
+    Description: MLflow Tracking Server name
+
+  StudioUrl:
+    Value: !Sub "https://${SageMakerDomain}.studio.${AWS::Region}.sagemaker.aws"
+    Description: SageMaker Studio URL

@@ -1,0 +1,299 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Service Catalog Product 3: SageMaker AI Domain.
+  Creates SageMaker domain (VPCOnly mode), user profiles, MLflow App,
+  S3 buckets, Access Grants, and Glue catalog.
+  Requires Product 1 (Networking) and Product 2 (IAM Roles) outputs.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name (must match Products 1 & 2)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC ID from Product 1 (Networking) outputs'
+
+  PrivateSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Private Subnet 1 ID from Product 1 outputs'
+
+  PrivateSubnet2Id:
+    Type: AWS::EC2::Subnet::Id
+    Description: 'Private Subnet 2 ID from Product 1 outputs'
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: 'Security Group ID from Product 1 outputs'
+
+  UserARoleArn:
+    Type: String
+    Description: 'User A Execution Role ARN from Product 2 outputs'
+
+  UserBRoleArn:
+    Type: String
+    Description: 'User B Execution Role ARN from Product 2 outputs'
+
+  UserAProfileName:
+    Type: String
+    Default: 'userA'
+    Description: 'Name for User A profile'
+
+  UserBProfileName:
+    Type: String
+    Default: 'userB'
+    Description: 'Name for User B profile'
+
+  JupyterLabAppInstance:
+    Type: String
+    Default: 'ml.m5.2xlarge'
+    Description: 'Instance type for JupyterLab spaces'
+
+Resources:
+  # --- S3 Buckets ---
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  GrantsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-grants-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  MLflowArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-mlflow-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # --- SageMaker Domain ---
+  SageMakerDomain:
+    Type: AWS::SageMaker::Domain
+    Properties:
+      DomainName: !Sub '${ProjectName}-Domain'
+      AuthMode: IAM
+      AppNetworkAccessType: VpcOnly
+      VpcId: !Ref VPCId
+      SubnetIds:
+        - !Ref PrivateSubnetId
+        - !Ref PrivateSubnet2Id
+      DefaultUserSettings:
+        SecurityGroups:
+          - !Ref SecurityGroupId
+        ExecutionRole: !Ref UserARoleArn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # --- User Profiles ---
+  SageMakerUserAProfile:
+    Type: AWS::SageMaker::UserProfile
+    DependsOn: SageMakerDomain
+    Properties:
+      DomainId: !GetAtt SageMakerDomain.DomainId
+      UserProfileName: !Ref UserAProfileName
+      UserSettings:
+        ExecutionRole: !Ref UserARoleArn
+        SecurityGroups:
+          - !Ref SecurityGroupId
+
+  SageMakerUserBProfile:
+    Type: AWS::SageMaker::UserProfile
+    DependsOn: SageMakerDomain
+    Properties:
+      DomainId: !GetAtt SageMakerDomain.DomainId
+      UserProfileName: !Ref UserBProfileName
+      UserSettings:
+        ExecutionRole: !Ref UserBRoleArn
+        SecurityGroups:
+          - !Ref SecurityGroupId
+
+  # --- MLflow App ---
+  # Note: SageMaker MLflow App creation may require custom resource or manual setup
+  # depending on region support. The app is created via SageMaker API.
+  # Uncomment and adapt the following if using a Lambda-backed custom resource:
+  #
+  # MLflowAppResource:
+  #   Type: Custom::MLflowApp
+  #   Properties:
+  #     ServiceToken: !GetAtt MLflowAppLambda.Arn
+  #     DomainId: !GetAtt SageMakerDomain.DomainId
+  #     AppName: !Sub '${ProjectName}-mlflow-app'
+  #     ArtifactsBucket: !Ref MLflowArtifactsBucket
+
+  # --- S3 Access Grants ---
+  AccessGrantsInstance:
+    Type: AWS::S3::AccessGrantsInstance
+    Properties: {}
+
+  AccessGrantsLocation:
+    Type: AWS::S3::AccessGrantsLocation
+    DependsOn: AccessGrantsInstance
+    Properties:
+      LocationScope: !Sub 's3://${GrantsBucket}'
+
+  AccessGrantUserA:
+    Type: AWS::S3::AccessGrant
+    DependsOn: AccessGrantsLocation
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !Ref UserARoleArn
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'UserA/'
+
+  AccessGrantUserB:
+    Type: AWS::S3::AccessGrant
+    DependsOn: AccessGrantsLocation
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !Ref UserBRoleArn
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'UserB/'
+
+  AccessGrantProductShared:
+    Type: AWS::S3::AccessGrant
+    DependsOn: AccessGrantsLocation
+    Properties:
+      AccessGrantsLocationId: !GetAtt AccessGrantsLocation.AccessGrantsLocationId
+      Grantee:
+        GranteeType: IAM
+        GranteeIdentifier: !Ref UserARoleArn
+      Permission: READWRITE
+      AccessGrantsLocationConfiguration:
+        S3SubPrefix: 'Product/'
+
+  # --- Glue Catalog ---
+  BankClassificationGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ProjectName}-bank-classification-db'
+        Description: Database for bank marketing classification data
+
+  BankMarketingGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref BankClassificationGlueDatabase
+      TableInput:
+        Name: bank-marketing-data
+        Description: Bank marketing campaign dataset for classification
+        StorageDescriptor:
+          Columns:
+            - Name: age
+              Type: int
+            - Name: job
+              Type: string
+            - Name: marital
+              Type: string
+            - Name: education
+              Type: string
+            - Name: default
+              Type: string
+            - Name: balance
+              Type: int
+            - Name: housing
+              Type: string
+            - Name: loan
+              Type: string
+            - Name: contact
+              Type: string
+            - Name: day
+              Type: int
+            - Name: month
+              Type: string
+            - Name: duration
+              Type: int
+            - Name: campaign
+              Type: int
+            - Name: pdays
+              Type: int
+            - Name: previous
+              Type: int
+            - Name: poutcome
+              Type: string
+            - Name: y
+              Type: string
+          Location: !Sub 's3://${DataBucket}/ml_pipelines/data/'
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+            Parameters:
+              field.delim: ','
+              skip.header.line.count: '1'
+        TableType: EXTERNAL_TABLE
+
+Outputs:
+  SageMakerDomainId:
+    Value: !GetAtt SageMakerDomain.DomainId
+    Description: SageMaker Domain ID
+
+  DataBucketName:
+    Value: !Ref DataBucket
+    Description: Data bucket name (use in lab notebooks)
+
+  GrantsBucketName:
+    Value: !Ref GrantsBucket
+    Description: Grants bucket name (governed data)
+
+  MLflowArtifactsBucketName:
+    Value: !Ref MLflowArtifactsBucket
+    Description: MLflow artifacts bucket
+
+  UserAProfileName:
+    Value: !Ref UserAProfileName
+    Description: User A profile name
+
+  UserBProfileName:
+    Value: !Ref UserBProfileName
+    Description: User B profile name
+
+  GlueDatabaseName:
+    Value: !Ref BankClassificationGlueDatabase
+    Description: Glue database for bank classification data

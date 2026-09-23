@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Service Catalog Product - ML Platform IAM Roles.
+  Creates SageMaker execution roles with least-privilege policies for
+  user profiles, training jobs, processing jobs, experiments, model management, and MLflow.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name for resource naming (must match networking stack)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+  UserAProfileName:
+    Type: String
+    Default: 'userA'
+    Description: 'Name for User A profile'
+
+  UserBProfileName:
+    Type: String
+    Default: 'userB'
+    Description: 'Name for User B profile'
+
+Resources:
+  # Execution role for the SageMaker domain (shared services)
+  ProductSageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-product-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+  # User A execution role
+  UserASageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-usera-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+  # User B execution role
+  UserBSageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-userb-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+  # S3 data access policy
+  S3DataAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-s3-data-access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}"
+              - !Sub "arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/*"
+              - "arn:aws:s3:::sagemaker-*"
+              - "arn:aws:s3:::sagemaker-*/*"
+      Roles:
+        - !Ref UserASageMakerExecutionRole
+        - !Ref UserBSageMakerExecutionRole
+        - !Ref ProductSageMakerExecutionRole
+
+  # MLflow tracking permissions
+  MLflowPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-mlflow-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:DescribeMlflowTrackingServer
+              - sagemaker:ListMlflowTrackingServers
+              - sagemaker:CreatePresignedMlflowTrackingServerUrl
+              - sagemaker-mlflow:*
+            Resource:
+              - !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:mlflow-tracking-server/*"
+      Roles:
+        - !Ref UserASageMakerExecutionRole
+        - !Ref UserBSageMakerExecutionRole
+        - !Ref ProductSageMakerExecutionRole
+
+  # CloudWatch Logs access
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-cw-logs-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:DescribeLogStreams
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/*"
+      Roles:
+        - !Ref UserASageMakerExecutionRole
+        - !Ref UserBSageMakerExecutionRole
+        - !Ref ProductSageMakerExecutionRole
+
+Outputs:
+  ProductRoleArn:
+    Value: !GetAtt ProductSageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-ProductRoleArn
+
+  UserARoleArn:
+    Value: !GetAtt UserASageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-UserARoleArn
+
+  UserBRoleArn:
+    Value: !GetAtt UserBSageMakerExecutionRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-UserBRoleArn

@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Service Catalog Product - Federation Role.
+  Creates an IAM role for federating users from an external Identity Provider (e.g., Okta)
+  into SageMaker Studio. Uses ABAC with principal tags (studiouserid) to ensure each
+  federated user can only access their own Studio user profile.
+  Reference: https://aws.amazon.com/blogs/machine-learning/configuring-amazon-sagemaker-studio-for-teams-and-groups-with-complete-resource-isolation/
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name for resource naming (must match other stacks)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+  SAMLProviderArn:
+    Type: String
+    Description: 'ARN of the SAML identity provider (e.g., arn:aws:iam::123456789012:saml-provider/Okta)'
+    AllowedPattern: '^arn:aws:iam::\d{12}:saml-provider/.+$'
+
+  SAMLProviderName:
+    Type: String
+    Description: 'Name of the SAML provider (e.g., Okta, AzureAD, PingFederate)'
+    Default: 'Okta'
+
+Resources:
+  # Federation role that IdP users assume when accessing SageMaker Studio
+  FederationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-federation-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Allow SAML federation with session tagging
+          - Sid: AllowSAMLFederation
+            Effect: Allow
+            Principal:
+              Federated: !Ref SAMLProviderArn
+            Action:
+              - sts:AssumeRoleWithSAML
+              - sts:TagSession
+            Condition:
+              StringEquals:
+                SAML:aud: 'https://signin.aws.amazon.com/saml'
+              ForAllValues:StringEquals:
+                sts:TransitiveTagKeys:
+                  - studiouserid
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Purpose
+          Value: IdP-to-Studio-Federation
+
+  # Policy: Restrict Studio presigned URL access to matching user profile
+  StudioAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-federation-studio-access
+      Description: >
+        Restricts Studio access so federated users can only open their own
+        user profile. The studiouserid principal tag (passed from IdP) must
+        match the studiouserid resource tag on the user profile.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPresignedUrlForOwnProfile
+            Effect: Allow
+            Action:
+              - sagemaker:CreatePresignedDomainUrl
+            Resource: '*'
+            Condition:
+              StringEquals:
+                sagemaker:ResourceTag/studiouserid: '${aws:PrincipalTag/studiouserid}'
+          - Sid: AllowDescribeDomain
+            Effect: Allow
+            Action:
+              - sagemaker:DescribeDomain
+              - sagemaker:ListDomains
+              - sagemaker:ListUserProfiles
+              - sagemaker:DescribeUserProfile
+            Resource: '*'
+      Roles:
+        - !Ref FederationRole
+
+  # Policy: SageMaker Studio read-only and basic console access
+  StudioConsolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-federation-console-access
+      Description: >
+        Provides minimal console access for federated users to navigate
+        to SageMaker Studio.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SageMakerConsoleReadOnly
+            Effect: Allow
+            Action:
+              - sagemaker:ListApps
+              - sagemaker:ListSpaces
+              - sagemaker:DescribeApp
+              - sagemaker:DescribeSpace
+              - sagemaker:GetSagemakerServicecatalogPortfolioStatus
+            Resource: '*'
+          - Sid: ServiceCatalogReadOnly
+            Effect: Allow
+            Action:
+              - servicecatalog:ListAcceptedPortfolioShares
+              - servicecatalog:ListPortfolios
+              - servicecatalog:SearchProducts
+            Resource: '*'
+      Roles:
+        - !Ref FederationRole
+
+Outputs:
+  FederationRoleArn:
+    Value: !GetAtt FederationRole.Arn
+    Description: ARN of the federation role for IdP configuration
+    Export:
+      Name: !Sub ${ProjectName}-FederationRoleArn
+
+  FederationRoleName:
+    Value: !Ref FederationRole
+    Description: Name of the federation role
+
+  SAMLProviderArnOutput:
+    Value: !Ref SAMLProviderArn
+    Description: SAML Provider ARN used for federation
+
+  IdPConfigurationNote:
+    Value: !Sub |
+      Configure your IdP (${SAMLProviderName}) with these SAML attributes:
+      1. https://aws.amazon.com/SAML/Attributes/PrincipalTag:studiouserid = <user unique id>
+      2. https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys = {"studiouserid"}
+      3. https://aws.amazon.com/SAML/Attributes/Role = ${FederationRole.Arn},${SAMLProviderArn}
+    Description: IdP SAML attribute configuration instructions
