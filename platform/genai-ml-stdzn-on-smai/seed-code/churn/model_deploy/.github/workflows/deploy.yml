@@ -55,6 +55,7 @@ jobs:
         env:
           MODEL_NAME_INPUT: ${{ inputs.model_name }}
           MPG_INPUT: ${{ inputs.model_package_group_name }}
+          EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           THIS_SHA: ${{ github.sha }}
         run: |
@@ -88,6 +89,13 @@ jobs:
               | sed -n 's|^models/\([^/]*\)/.*|\1|p' \
               | sort -u \
               | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+
+          # Someone clicked Run workflow and expects a deployment. Skipping
+          # silently would look like success, so fail and say what to do instead.
+          if [ "$MODELS" = "[]" ] && [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "::error::Nothing to deploy: the latest commit did not change any folder under models/. Run the workflow again and fill in model_name with the model folder, for example bank-classification."
+            exit 1
           fi
 
           echo "models=$MODELS" >> "$GITHUB_OUTPUT"
