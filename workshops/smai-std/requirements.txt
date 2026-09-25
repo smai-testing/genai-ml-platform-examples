@@ -1,0 +1,61 @@
+# ============================================================================
+# GenAI & ML Standardization workshop — consolidated dependencies
+#
+# Single source of truth for every lab notebook (labs 1-5).
+# Install ONCE from the repo root via setup.ipynb:
+#
+#     uv pip install --system -r requirements.txt
+#
+# Do not add per-notebook `pip install` cells — add packages here instead.
+# ============================================================================
+
+# --- AWS / SageMaker SDK (v3 — modular metapackage) -------------------------
+boto3>=1.36.0
+sagemaker>=3,<4                 # labs 2a, 2b, 3a, 3b, 3c (v3 API only)
+sagemaker-core>=2,<3
+sagemaker-train>=1,<2
+sagemaker-serve>=1,<2
+sagemaker-mlops>=1,<2
+
+sagemaker-mlflow>=0.5.0,<1      # MLflow tracking against the SageMaker MLflow app
+
+# --- Experiment tracking -----------------------------------------------------
+mlflow>=3.10.0,<4               # labs 3a, 3b, 3c, 5d, 5e, 5f
+
+# --- Data & classic ML -------------------------------------------------------
+pandas>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.5.0
+xgboost>=2.1.0
+
+# --- LLM fine-tuning & evaluation (labs 2b, 3b, 3c) --------------------------
+datasets>=4.4.1                 # lab-2b/3b enforce >=4.4.1 at runtime
+evaluate>=0.4.0
+rouge-score>=0.1.2
+nltk>=3.9                       # BLEU scoring in lab3-model-build/metrics.py
+tiktoken>=0.7.0
+
+# --- Statistics / explainability (lab 5) --------------------------------------
+scipy>=1.14.0
+statsmodels>=0.14.4             # required by Evidently for statistical tests
+shap>=0.46.0                    # >=0.46 pulls numba/llvmlite with Py3.12 wheels
+numba>=0.59.0                   # pinned so the resolver never backtracks to 0.47
+llvmlite>=0.42.0                # same — avoid the Py<3.10-only 0.36 backtrack
+evidently>=0.5.0                # drift detection (lab 5d/5e)
+
+# --- AWS data access (lab 5) --------------------------------------------------
+awswrangler>=3.9.0              # Athena/S3 Data Wrangler
+pyathena>=3.8.0
+pyarrow>=17.0.0                 # Parquet support for Iceberg
+
+# --- Visualization -------------------------------------------------------------
+matplotlib>=3.9.0
+seaborn>=0.13.0
+plotly>=5.24.0
+
+# --- Utilities ------------------------------------------------------------------
+packaging>=23.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.2
+ipykernel>=6.29.0
+ipywidgets>=8.1.0               # silences tqdm IProgress warning; Evidently HTML reports

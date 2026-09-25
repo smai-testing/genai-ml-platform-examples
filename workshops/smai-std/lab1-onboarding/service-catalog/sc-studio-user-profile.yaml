@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Service Catalog Product - Studio User Profile.
+  Creates an individual SageMaker Studio user profile within an existing domain.
+  Enables day-2 onboarding of new users without modifying the domain stack.
+  Tags the profile with studiouserid for ABAC-based access control via the federation role.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name for resource naming (must match other stacks)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+  DomainId:
+    Type: String
+    Description: 'SageMaker Domain ID to create the user profile in (from Studio Domain stack output)'
+    AllowedPattern: '^d-[a-z0-9]+$'
+
+  UserProfileName:
+    Type: String
+    Description: 'Unique name for the Studio user profile (e.g., jdoe, analyst-1)'
+    AllowedPattern: '^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}$'
+    MinLength: 1
+    MaxLength: 63
+
+  StudioUserId:
+    Type: String
+    Description: >
+      Value for the studiouserid tag. Must match the IdP attribute value for this user.
+      The federation role policy checks this tag to authorize Studio access.
+    MinLength: 1
+    MaxLength: 256
+
+  ExecutionRoleArn:
+    Type: String
+    Description: 'ARN of the IAM execution role for this user (team-specific role from Roles stack)'
+    AllowedPattern: '^arn:aws:iam::\d{12}:role/.+$'
+
+  TeamName:
+    Type: String
+    Default: ''
+    Description: '(Optional) Team name tag for ABAC team-level resource isolation'
+
+Conditions:
+  HasTeamName: !Not [!Equals [!Ref TeamName, '']]
+
+Resources:
+  # Studio user profile with studiouserid tag for federation access control
+  UserProfile:
+    Type: AWS::SageMaker::UserProfile
+    Properties:
+      DomainId: !Ref DomainId
+      UserProfileName: !Ref UserProfileName
+      UserSettings:
+        ExecutionRole: !Ref ExecutionRoleArn
+      Tags:
+        - Key: studiouserid
+          Value: !Ref StudioUserId
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: owner
+          Value: !Ref UserProfileName
+        - !If
+          - HasTeamName
+          - Key: team
+            Value: !Ref TeamName
+          - !Ref AWS::NoValue
+
+Outputs:
+  UserProfileArn:
+    Value: !GetAtt UserProfile.UserProfileArn
+    Description: ARN of the created user profile
+
+  UserProfileName:
+    Value: !Ref UserProfileName
+    Description: Name of the user profile
+
+  StudioUserId:
+    Value: !Ref StudioUserId
+    Description: The studiouserid tag value (must match IdP attribute for federation)
+
+  StudioUrl:
+    Value: !Sub 'https://studio-${DomainId}.studio.${AWS::Region}.sagemaker.aws/user/${UserProfileName}'
+    Description: Direct Studio URL for this user profile (requires federation or IAM auth)

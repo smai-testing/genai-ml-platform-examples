@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Service Catalog Product 2: ML Platform IAM Roles.
+  Creates SageMaker execution roles with least-privilege policies for user
+  profiles and processing/training jobs. Requires Product 1 (Networking) outputs.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name (must match Product 1)'
+    AllowedPattern: '^[a-z0-9-]+$'
+
+Resources:
+  # --- User A Execution Role ---
+  UserASageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-usera-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+                - s3.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SageMakerCommonJobManagementPolicy
+        - !Ref SageMakerExperimentsPolicy
+        - !Ref SageMakerModelManagementPolicy
+        - !Ref SageMakerStudioAppPolicy
+        - !Ref SageMakerMLflowPolicy
+        - !Ref CloudWatchLogsPolicy
+        - !Ref StudioUserS3Policy
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # --- User B Execution Role ---
+  UserBSageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-userb-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+                - s3.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SageMakerCommonJobManagementPolicy
+        - !Ref SageMakerExperimentsPolicy
+        - !Ref SageMakerModelManagementPolicy
+        - !Ref SageMakerStudioAppPolicy
+        - !Ref SageMakerMLflowPolicy
+        - !Ref CloudWatchLogsPolicy
+        - !Ref StudioUserS3Policy
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # --- Product/Shared Execution Role ---
+  ProductSageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-product-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sagemaker.amazonaws.com
+                - s3.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref SageMakerCommonJobManagementPolicy
+        - !Ref SageMakerExperimentsPolicy
+        - !Ref SageMakerModelManagementPolicy
+        - !Ref SageMakerStudioAppPolicy
+        - !Ref SageMakerMLflowPolicy
+        - !Ref CloudWatchLogsPolicy
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # --- Managed Policies ---
+  SageMakerCommonJobManagementPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-job-mgmt-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateTrainingJob
+              - sagemaker:CreateProcessingJob
+              - sagemaker:CreateTransformJob
+              - sagemaker:CreateHyperParameterTuningJob
+              - sagemaker:StopTrainingJob
+              - sagemaker:StopProcessingJob
+              - sagemaker:DescribeTrainingJob
+              - sagemaker:DescribeProcessingJob
+              - sagemaker:DescribeTransformJob
+              - sagemaker:DescribeHyperParameterTuningJob
+              - sagemaker:UpdateTrainingJob
+              - sagemaker:BatchGetMetrics
+              - sagemaker:Search
+              - sagemaker:ListTrainingJobs
+              - sagemaker:ListProcessingJobs
+              - sagemaker:ListTransformJobs
+            Resource: '*'
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !GetAtt UserASageMakerExecutionRole.Arn
+              - !GetAtt UserBSageMakerExecutionRole.Arn
+              - !GetAtt ProductSageMakerExecutionRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService: sagemaker.amazonaws.com
+
+  SageMakerExperimentsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-experiments-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateExperiment
+              - sagemaker:CreateTrial
+              - sagemaker:CreateTrialComponent
+              - sagemaker:UpdateExperiment
+              - sagemaker:UpdateTrial
+              - sagemaker:UpdateTrialComponent
+              - sagemaker:DescribeExperiment
+              - sagemaker:DescribeTrial
+              - sagemaker:DescribeTrialComponent
+              - sagemaker:DeleteExperiment
+              - sagemaker:DeleteTrial
+              - sagemaker:DeleteTrialComponent
+              - sagemaker:AssociateTrialComponent
+              - sagemaker:DisassociateTrialComponent
+              - sagemaker:AddAssociation
+              - sagemaker:DeleteAssociation
+              - sagemaker:ListExperiments
+              - sagemaker:ListTrials
+              - sagemaker:ListTrialComponents
+              - sagemaker:Search
+            Resource: '*'
+
+  SageMakerModelManagementPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-model-mgmt-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateModel
+              - sagemaker:CreateModelPackage
+              - sagemaker:CreateModelPackageGroup
+              - sagemaker:DescribeModel
+              - sagemaker:DescribeModelPackage
+              - sagemaker:DescribeModelPackageGroup
+              - sagemaker:UpdateModelPackage
+              - sagemaker:DeleteModel
+              - sagemaker:DeleteModelPackage
+              - sagemaker:ListModels
+              - sagemaker:ListModelPackages
+              - sagemaker:ListModelPackageGroups
+              - sagemaker:BatchDescribeModelPackage
+            Resource: '*'
+
+  SageMakerStudioAppPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-studio-app-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:CreateApp
+              - sagemaker:DeleteApp
+              - sagemaker:DescribeApp
+              - sagemaker:CreateSpace
+              - sagemaker:DeleteSpace
+              - sagemaker:UpdateSpace
+              - sagemaker:DescribeSpace
+              - sagemaker:ListApps
+              - sagemaker:ListDomains
+              - sagemaker:ListUserProfiles
+              - sagemaker:ListSpaces
+              - sagemaker:DescribeDomain
+              - sagemaker:DescribeUserProfile
+              - sagemaker:CreatePresignedDomainUrl
+            Resource: '*'
+
+  SageMakerMLflowPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-mlflow-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sagemaker:DescribeMlflowTrackingServer
+              - sagemaker:ListMlflowTrackingServers
+              - sagemaker:CreatePresignedMlflowTrackingServerUrl
+              - sagemaker-mlflow:*
+            Resource: '*'
+
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-cw-logs-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:FilterLogEvents
+              - logs:GetLogEvents
+              - logs:DescribeLogStreams
+              - logs:DescribeLogGroups
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/*'
+
+  StudioUserS3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ProjectName}-studio-s3-policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}'
+              - !Sub 'arn:aws:s3:::${ProjectName}-data-${AWS::AccountId}-${AWS::Region}/*'
+              - 'arn:aws:s3:::sagemaker-*'
+              - 'arn:aws:s3:::sagemaker-*/*'
+          - Effect: Allow
+            Action:
+              - s3:GetDataAccess
+            Resource:
+              - !Sub 'arn:aws:s3:${AWS::Region}:${AWS::AccountId}:access-grants/default'
+
+Outputs:
+  UserAExecutionRoleArn:
+    Value: !GetAtt UserASageMakerExecutionRole.Arn
+    Description: User A SageMaker Execution Role ARN
+    Export:
+      Name: !Sub '${ProjectName}-UserARoleArn'
+
+  UserBExecutionRoleArn:
+    Value: !GetAtt UserBSageMakerExecutionRole.Arn
+    Description: User B SageMaker Execution Role ARN
+    Export:
+      Name: !Sub '${ProjectName}-UserBRoleArn'
+
+  ProductRoleArn:
+    Value: !GetAtt ProductSageMakerExecutionRole.Arn
+    Description: Shared Product Execution Role ARN
+    Export:
+      Name: !Sub '${ProjectName}-ProductRoleArn'

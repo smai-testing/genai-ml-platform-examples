@@ -1,0 +1,120 @@
+# =============================================================================
+# Dataset Schema — Single Source of Truth
+# =============================================================================
+# Every column name, type, and role (feature / target / identifier / aux)
+# used anywhere in this project — Athena DDL, the training pipeline, the
+# drift monitor, scheduled inference/batch-transform — is derived from THIS
+# file via src/config/schema.py. Nothing else in the codebase hardcodes a
+# feature list.
+#
+# To bring your own dataset:
+#   1. Edit this file: identifier_column, target_column, and the full
+#      `features` list (name + type) for YOUR data.
+#   2. Update config.yaml:
+#      - `preprocessing` section: column_rename_map, categorical_columns,
+#        target_transform (source_column + positive_value), identifier prefix.
+#      - `data.csv_training_data`: output CSV filename.
+#      - `training.xgboost_params`: tune for your class balance.
+#      - `drift_generation.default_drift`: update feature names.
+#   3. Place your raw CSV in `data/raw/` and set `preprocessing.raw_input_csv`.
+#   4. Run:  python -m src.setup.prepare_dataset
+#      (preprocesses raw CSV → pipeline-ready output in data/)
+#   5. Upload to S3:  python -m src.setup.upload_data_to_s3
+#   6. Recreate the Athena tables:
+#         ./cloudformation/deploy-stack.sh --recreate-database
+#   7. Validate:  python -m src.setup.validate_dataset_schema
+#   8. Run the training pipeline. No code changes needed.
+#
+# Supported `type` values: double, string, boolean, int, timestamp
+# (must map onto Athena/Iceberg SQL types — see schema.py ATHENA_TYPE_MAP).
+# =============================================================================
+
+dataset:
+  # Unique row identifier. STRING in Athena regardless of source type.
+  # The Bank Marketing dataset has no natural ID, so we generate a synthetic
+  # one during data download (row index prefixed with 'bm-').
+  identifier_column: client_id
+
+  # Primary event timestamp. For Bank Marketing, the 'day' and 'month'
+  # features partially encode timing but there's no single timestamp field.
+  # We use a synthetic timestamp generated at download time.
+  timestamp_column: contact_timestamp
+
+  # Binary classification target. BOOLEAN in Athena; the training script
+  # casts to 0/1 internally. Bank Marketing target: did the client subscribe
+  # to a term deposit? (original column 'y': yes/no)
+  target_column: subscribed
+  target_type: boolean
+
+  # Columns present in the source predictions CSV that are NOT model
+  # features — carried through to training_data/evaluation_data/drifted_data
+  # for auditability, but never passed to the model.
+  auxiliary_columns:
+    - name: prediction
+      type: boolean
+    - name: probability_positive
+      type: double
+
+  # Full feature list, in the order the pipeline expects them. Do not
+  # reorder existing entries when adding new features — appending is safe;
+  # reordering forces a full re-seed via --recreate-database.
+  #
+  # Bank Marketing (bank-additional-full.csv) features after label-encoding
+  # categorical columns. All types are DOUBLE after encoding.
+  #
+  # Numeric features (kept as-is):
+  #   age, duration, campaign, pdays, previous, emp.var.rate,
+  #   cons.price.idx, cons.conf.idx, euribor3m, nr.employed
+  # Categorical features (label-encoded to numeric):
+  #   job, marital, education, default, housing, loan, contact,
+  #   month, day_of_week, poutcome
+  features:
+    - name: age
+      type: double
+    - name: job
+      type: double
+    - name: marital
+      type: double
+    - name: education
+      type: double
+    - name: credit_default
+      type: double
+    - name: housing
+      type: double
+    - name: loan
+      type: double
+    - name: contact
+      type: double
+    - name: month
+      type: double
+    - name: day_of_week
+      type: double
+    - name: duration
+      type: double
+    - name: campaign
+      type: double
+    - name: pdays
+      type: double
+    - name: previous
+      type: double
+    - name: poutcome
+      type: double
+    - name: emp_var_rate
+      type: double
+    - name: cons_price_idx
+      type: double
+    - name: cons_conf_idx
+      type: double
+    - name: euribor3m
+      type: double
+    - name: nr_employed
+      type: double
+
+  # Deterministic 80/20 train/eval split. `hash_column` is hashed
+  # (xxhash64 mod 10) so re-running the seed produces the identical split —
+  # required for the evaluation_data table to be a stable model-drift
+  # baseline across retrains.
+  split:
+    strategy: deterministic_hash
+    train_ratio: 0.8
+    hash_column: client_id

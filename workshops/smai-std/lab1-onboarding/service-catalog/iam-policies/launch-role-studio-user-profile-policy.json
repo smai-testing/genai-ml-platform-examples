@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SageMakerUserProfileManagement",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateUserProfile",
+        "sagemaker:DeleteUserProfile",
+        "sagemaker:DescribeUserProfile",
+        "sagemaker:UpdateUserProfile",
+        "sagemaker:ListUserProfiles",
+        "sagemaker:ListTags",
+        "sagemaker:AddTags",
+        "sagemaker:DeleteTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SageMakerDomainRead",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:DescribeDomain",
+        "sagemaker:ListDomains"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMPassRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "sagemaker.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "IAMRoleRead",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:ListRoles"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudFormation",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStack",
+        "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:GetTemplate",
+        "cloudformation:UpdateStack",
+        "cloudformation:ListStackResources"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Main stack - Orchestrates deployment of networking, IAM, SageMaker, and
+  inference-capture nested stacks.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Project name (must be lowercase letters, numbers, and hyphens only)'
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: 'ProjectName must contain only lowercase letters, numbers, and hyphens'
+
+  S3TemplateBucket:
+    Type: String
+    Description: >
+      Name of an S3 bucket in THIS account and region that holds the nested
+      child templates (1-networking.yaml, 2-iam.yaml, 3-sagemaker.yaml,
+      4-inference-capture.yaml). Upload the templates under S3TemplateKeyPrefix
+      before deploying. Using your own bucket removes the dependency on the
+      public assets bucket, which can go stale. Use a bucket name without dots
+      so the virtual-hosted HTTPS URL resolves correctly.
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+    ConstraintDescription: 'Must be a valid S3 bucket name (lowercase, 3-63 chars, no dots).'
+
+  S3TemplateKeyPrefix:
+    Type: String
+    Default: 'genai-ml-std-assets'
+    Description: >
+      Key prefix (folder) within S3TemplateBucket where the child templates are
+      uploaded. No leading or trailing slash.
+    AllowedPattern: '^[a-zA-Z0-9!_.*()/''-]*$'
+
+  VpcCIDR:
+    Type: String
+    Default: 10.1.0.0/16
+
+  PrivateSubnetCIDR:
+    Type: String
+    Default: 10.1.1.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.1.2.0/24
+
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.1.3.0/24
+
+  JupyterLabAppInstance:
+    Type: String
+    Default: 'ml.m5.2xlarge'
+
+  UserAProfileName:
+    Type: String
+    Default: 'userA'
+
+  UserBProfileName:
+    Type: String
+    Default: 'userB'
+
+  SeedCodeType:
+    Type: String
+    Default: 'llm-fine-tuning'
+    AllowedValues:
+      - regression
+      - llm-fine-tuning
+      - classification
+
+  EMRReleaseLabel:
+    Type: String
+    Default: 'emr-7.5.0'
+    Description: >
+      EMR release used by the Lab 2 data-prep EMR Serverless application (2C)
+      and EMR on EC2 clusters (2D).
+
+  CreateServiceCatalogRoles:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Whether the IAM stack should create the account-global, fixed-name
+      SageMaker Projects / Service Catalog product roles. Set to 'false' when
+      they already exist in the account (e.g. another workshop deployment owns
+      them) to avoid AlreadyExists errors and reuse the existing roles.
+      Note: scripts/deploy-workshop.sh detects existing roles automatically
+      (CREATE_SC_ROLES=auto) and passes the correct value here.
+
+  AttachQuickSightServiceRolePolicy:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >
+      Whether the IAM stack should attach Lab 5E's data-access policies to
+      QuickSight's service role (aws-quicksight-service-role-v0). Only valid
+      once the account is subscribed to QuickSight, because that is what creates
+      the role and AWS::IAM::Policy cannot attach to a role that does not exist.
+      Note: scripts/deploy-workshop.sh subscribes QuickSight (when asked) and
+      then passes 'true' here automatically if the role is present.
+
+Resources:
+  NetworkingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${S3TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${S3TemplateKeyPrefix}/1-networking.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcCIDR: !Ref VpcCIDR
+        PrivateSubnetCIDR: !Ref PrivateSubnetCIDR
+        PrivateSubnet2CIDR: !Ref PrivateSubnet2CIDR
+        PublicSubnetCIDR: !Ref PublicSubnetCIDR
+
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkingStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${S3TemplateKeyPrefix}/2-iam.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        CreateServiceCatalogRoles: !Ref CreateServiceCatalogRoles
+        AttachQuickSightServiceRolePolicy: !Ref AttachQuickSightServiceRolePolicy
+
+  SageMakerStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: IAMStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${S3TemplateKeyPrefix}/3-sagemaker.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        JupyterLabAppInstance: !Ref JupyterLabAppInstance
+        UserAProfileName: !Ref UserAProfileName
+        UserBProfileName: !Ref UserBProfileName
+        SeedCodeType: !Ref SeedCodeType
+
+  # Inference-capture data plane (SQS + Lambda -> Athena Iceberg table).
+  # Depends on SageMakerStack because it uses the data bucket created there,
+  # and on the IAM stack's role-name outputs to attach the SQS-send policy.
+  InferenceCaptureStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: SageMakerStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${S3TemplateKeyPrefix}/4-inference-capture.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        # Pass the real workshop data bucket created by SageMakerStack so this
+        # stack does NOT fall back to deriving a bucket. (The old blank/derive
+        # path assumed the SageMaker default bucket sagemaker-<region>-<account>,
+        # which does not exist in a fresh account.)
+        DataBucketName: !GetAtt SageMakerStack.Outputs.DataBucketName
+        EndpointExecutionRoleNames: !Join
+          - ','
+          - - !GetAtt IAMStack.Outputs.ProductSageMakerExecutionRoleName
+            - !GetAtt IAMStack.Outputs.UserASageMakerExecutionRoleName
+            - !GetAtt IAMStack.Outputs.UserBSageMakerExecutionRoleName
+
+  # Lab 2 data-prep plane: Glue/Athena + S3 Tables Iceberg schemas and the EMR
+  # Serverless (2C) / EMR on EC2 (2D) roles. Depends on InferenceCaptureStack
+  # because both share the 'bank_marketing' Glue database, which
+  # InferenceCaptureStack creates first -- this stack reuses it
+  # (CreateGlueDatabase=false) to avoid an "already exists" collision.
+  # Lake Formation grants are disabled here (EnableLakeFormationGrants=false):
+  # the deploy relies on the account's LF IAM_ALLOWED_PRINCIPALS default
+  # (ensured by scripts/deploy-workshop.sh) so IAM Glue permissions govern the
+  # tables. Set to 'true' only when deploying as a Lake Formation admin.
+  DataPrepStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: InferenceCaptureStack
+    Properties:
+      TemplateURL: !Sub 'https://${S3TemplateBucket}.s3.${AWS::Region}.amazonaws.com/${S3TemplateKeyPrefix}/5-data-prep.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        # Pass the real workshop data bucket created by SageMakerStack. Without
+        # this, the stack derived Athena output/table locations under the
+        # SageMaker default bucket sagemaker-<region>-<account>, which does not
+        # exist in a fresh account — StartQueryExecution then failed with
+        # "Unable to verify/create output bucket" and rolled the deploy back.
+        DataBucketName: !GetAtt SageMakerStack.Outputs.DataBucketName
+        # Reuse the bank_marketing database created by InferenceCaptureStack.
+        CreateGlueDatabase: 'false'
+        # Not an LF admin at deploy time; rely on IAM_ALLOWED_PRINCIPALS default.
+        EnableLakeFormationGrants: 'false'
+        EMRReleaseLabel: !Ref EMRReleaseLabel
+
+Outputs:
+  ProjectName:
+    Description: >
+      The workshop project name (single source of truth). Notebooks resolve
+      resource names from this rather than hardcoding them. Equals the MLflow
+      experiment name used in Lab 3A.
+    Value: !Ref ProjectName
+
+  AthenaDatabase:
+    Description: >
+      Glue/Athena database holding the bank-marketing training, evaluation,
+      and inference-capture Iceberg tables (Labs 2-5 read/write here).
+    Value: !GetAtt InferenceCaptureStack.Outputs.GlueDatabaseName
+
+  VPCId:
+    Value: !GetAtt NetworkingStack.Outputs.VPCId
+
+  SageMakerDomainId:
+    Value: !GetAtt SageMakerStack.Outputs.SageMakerDomainId
+
+  DataBucketName:
+    Value: !GetAtt SageMakerStack.Outputs.DataBucketName
+
+  MLflowAppArn:
+    Value: !GetAtt SageMakerStack.Outputs.MLflowAppArn
+
+  UserAExecutionRoleArn:
+    Value: !GetAtt IAMStack.Outputs.UserASageMakerExecutionRoleArn
+
+  UserBExecutionRoleArn:
+    Value: !GetAtt IAMStack.Outputs.UserBSageMakerExecutionRoleArn
+
+  InferenceCaptureQueueUrl:
+    Description: SQS queue URL for endpoint inference capture (set as SQS_QUEUE_URL on the endpoint)
+    Value: !GetAtt InferenceCaptureStack.Outputs.InferenceCaptureQueueUrl
+
+  InferenceCaptureTable:
+    Description: Athena Iceberg table capturing endpoint predictions
+    Value: !GetAtt InferenceCaptureStack.Outputs.InferenceTableName
+
+  DataPrepTrainingTable:
+    Description: Lab 2 training-split Athena Iceberg table
+    Value: !GetAtt DataPrepStack.Outputs.TrainingTableName
+
+  DataPrepEvaluationTable:
+    Description: Lab 2 evaluation-split Athena Iceberg table
+    Value: !GetAtt DataPrepStack.Outputs.EvaluationTableName
+
+  DataPrepTableBucketName:
+    Description: S3 Table Bucket holding the Lab 2 managed Iceberg tables
+    Value: !GetAtt DataPrepStack.Outputs.TableBucketName
+
+  EMRServerlessApplicationId:
+    Description: EMR Serverless application ID for Lab 2C data prep
+    Value: !GetAtt DataPrepStack.Outputs.EMRServerlessApplicationId

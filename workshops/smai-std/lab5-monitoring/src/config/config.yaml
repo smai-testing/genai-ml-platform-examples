@@ -1,0 +1,417 @@
+# =============================================================================
+# Central Configuration for Drift Monitoring Pipeline
+# =============================================================================
+# Single source of truth for shared variables across pipeline stages. Each
+# value here maps to a constant in src/config/config.py. Environment variables
+# in .env take precedence over values defined here.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Project
+# ---------------------------------------------------------------------------
+# Used to derive the account-agnostic data bucket when DATA_S3_BUCKET / s3.bucket
+# are not set: ${project.name}-data-${AWS::AccountId}. Must match the
+# ProjectName parameter used by the CloudFormation stack.
+project:
+  name: bank-marketing-prediction
+  # Deployed workshop CloudFormation stack name (deploy-workshop.sh default is
+  # "${PROJECT_NAME}-workshop"). Notebooks resolve the data bucket, Athena
+  # database, MLflow ARN, inference-capture queue, and tables from THIS stack's
+  # outputs, so those values are never declared twice. Leave blank to let the
+  # resolver fall back to "${name}-workshop".
+  stack_name: ""
+
+# ---------------------------------------------------------------------------
+# AWS
+# ---------------------------------------------------------------------------
+# `region` is the data-plane region: everything you provision (SageMaker
+# domain, Lambdas, S3, Athena, ECR, EventBridge) lives here. CFN, the
+# notebooks, and the deploy/delete shell scripts ALL read this value
+# (overridable per-run via AWS_REGION / AWS_DEFAULT_REGION env vars).
+#
+# `quicksight_identity_region` is independent — QuickSight has a single
+# identity endpoint per account (the region where you first activated the
+# subscription). ALL QuickSight API calls must hit that endpoint regardless
+# of where the data lives. Default to us-east-1 since that's the most
+# common identity region; override here or via QUICKSIGHT_IDENTITY_REGION
+# env var if your account was activated elsewhere.
+aws:
+  region: us-east-1
+  quicksight_identity_region: us-east-1
+
+# ---------------------------------------------------------------------------
+# SageMaker
+# ---------------------------------------------------------------------------
+sagemaker:
+  exec_role: ""                  # ARN of the SageMaker execution role
+  serverless_memory_size: 2048   # MB (1024-6144)
+  serverless_max_concurrency: 5  # Max concurrent invocations (1-200)
+  batch_transform_instance: ml.m5.xlarge
+  batch_transform_max_concurrent: 4
+
+# ---------------------------------------------------------------------------
+# MLflow tracking server settings
+# ---------------------------------------------------------------------------
+mlflow:
+  tracking_uri: ""               # Resolved from the workshop stack's MLflowAppArn output
+  # All MLflow experiments/registered-model use the single-source project name
+  # (matches Lab 3A's experiment "bank-marketing-prediction") so training,
+  # inference, and drift-monitoring runs land in the same MLflow app.
+  experiment_name: bank-marketing-prediction
+  inference_experiment_name: bank-marketing-prediction
+  batch_experiment_name: bank-marketing-prediction
+  monitoring_experiment_name: bank-marketing-prediction
+  # Single canonical identifier — used as both the MLflow registered-model name
+  # AND the SageMaker Model Package Group name. Matches the model registered by
+  # Lab 3A (bank-prediction-XGBoostModel).
+  model_name: bank-prediction-XGBoostModel
+
+# ---------------------------------------------------------------------------
+# Athena data lake settings
+# ---------------------------------------------------------------------------
+athena:
+  database: bank_marketing
+  workgroup: primary
+  output_s3: ""                  # S3 path for Athena query results (derived from data bucket if empty)
+  query_timeout: 300             # Seconds
+  # training_data / evaluation_data / inference_responses are created by the
+  # workshop CloudFormation stack (5-data-prep.yaml + 4-inference-capture.yaml)
+  # in the bank_marketing database. The remaining tables below
+  # (monitoring_responses, ground_truth*, drifted_data) are created at runtime
+  # by the in-notebook monitoring code.
+  training_table: training_data
+  evaluation_table: evaluation_data
+  inference_table: inference_responses
+  monitoring_responses_table: monitoring_responses
+  # Two ground-truth tables — `ground_truth` is the raw labels feed (one
+  # row per labeled transaction), `ground_truth_updates` records the
+  # ground-truth-applied audit trail per inference_id and is what the
+  # drift Lambda joins against for model-drift scoring.
+  ground_truth_table: ground_truth
+  ground_truth_updates_table: ground_truth_updates
+  drifted_data_table: drifted_data
+
+# ---------------------------------------------------------------------------
+# SageMaker endpoint (created at runtime by Lab 3A, NOT by CloudFormation)
+# ---------------------------------------------------------------------------
+# Leave `name` blank to auto-discover the live InService endpoint whose name
+# starts with `name_prefix` (the Lab 3A pattern bank-marketing-<timestamp>).
+# Set `name` explicitly only to pin a specific endpoint.
+endpoint:
+  name: ""
+  name_prefix: "bank-marketing"
+
+# ---------------------------------------------------------------------------
+# S3 storage
+# ---------------------------------------------------------------------------
+s3:
+  bucket: ""                     # Data lake bucket (resolved from the workshop stack's DataBucketName output)
+  prefix: "bank-marketing-lab/"  # Matches Lab 3A's S3 layout
+  # Per-resource paths (populated automatically from bucket + prefix if left empty)
+  training_data: ""              # s3://bucket/prefix/training_data/
+  ground_truth: ""               # s3://bucket/prefix/ground_truth/
+  inference_responses: ""        # s3://bucket/prefix/inference_responses/
+  drifted_data: ""               # s3://bucket/prefix/drifted_data/
+  ground_truth_updates: ""       # s3://bucket/prefix/ground_truth_updates/
+  model_artifacts: ""            # s3://bucket/prefix/model_artifacts/
+  training_data_export: ""       # s3://bucket/prefix/training_data_export/
+  batch_transform_input: ""      # s3://bucket/prefix/batch_transform/input/
+  batch_transform_output: ""     # s3://bucket/prefix/batch_transform/output/
+
+# ---------------------------------------------------------------------------
+# SQS queue configuration
+# ---------------------------------------------------------------------------
+# Two SQS queues exist:
+#   1. Inference-logging queue (CFN resource InferenceLoggerQueue, name
+#      ${ProjectName}-inference-logging). Resolved at endpoint-deploy time —
+#      notebook 2 looks it up by name and passes the URL into the container env.
+#   2. Monitoring-results queue (name below). Created at runtime by
+#      src/drift_monitoring/deploy_monitoring_writer.py — calls sqs.create_queue
+#      with this name, then wires the queue → bank-marketing-prediction-results-writer
+#      Lambda. Triggered from notebook 3 Section 5.2.
+sqs:
+  # SLATED FOR DELETION — the monitoring-results SQS queue belongs to the
+  # out-of-scope drift plane (see DELETION_CANDIDATES.md). The in-notebook
+  # path writes monitoring_responses directly to Athena, no SQS.
+  monitoring_queue_name: bank-marketing-monitoring-results
+  monitoring_queue_url: ""
+
+# ---------------------------------------------------------------------------
+# Inference logging master switch
+# ---------------------------------------------------------------------------
+# Container env var. When false, the inference handler returns predictions
+# but skips the SQS send. Used for endpoints where you want pure inference
+# without the drift-monitoring side-effects.
+inference_logging:
+  enable_athena_logging: "true"
+
+# ---------------------------------------------------------------------------
+# Inference confidence thresholds
+# ---------------------------------------------------------------------------
+inference:
+  high_confidence_threshold: 0.9
+  low_confidence_lower: 0.4
+  low_confidence_upper: 0.6
+
+  # ------------------------------------------------------------------
+  # Prediction-output column names (BYO-dataset knobs)
+  # ------------------------------------------------------------------
+  # The endpoint's custom inference handler writes each prediction to the
+  # inference_responses Athena table with these column names. Defaults match
+  # the bank-marketing reference implementation. Change these ONLY if you
+  # deploy a custom inference handler that emits differently-named columns.
+  #
+  # `prediction_column` is the discrete output (0/1, class label, or bucket).
+  # `probability_column` is the continuous score/probability the drift monitor
+  # uses for ROC-AUC and Evidently classification drift.
+  # `probability_alt_column` is the "other class" probability in binary
+  # classification. Leave empty for non-binary targets — nothing downstream
+  # requires it.
+  prediction_column: "prediction"
+  probability_column: "probability_positive"
+  probability_alt_column: "probability_negative"
+
+# ---------------------------------------------------------------------------
+# Lambda configuration
+# ---------------------------------------------------------------------------
+# Three Lambdas in this project (none of their names are configurable here —
+# they're set in their respective deployers/CFN):
+#
+#   inference-logger  (${ProjectName}-inference-logger)
+#     CloudFormation-provisioned (sagemaker-mlflow-setup.yaml →
+#     InferenceLoggerFunction). Drains the inference-logging SQS queue into
+#     the inference_responses Athena table.
+#
+#   monitoring-writer (bank-marketing-prediction-results-writer)
+#     Out-of-band — deployed by src/drift_monitoring/deploy_monitoring_writer.py,
+#     invoked from notebook 3 Section 5.2. Drains the monitoring-results SQS
+#     queue (above) into monitoring_responses + back-fills monitoring_run_id
+#     on inference_responses.
+#
+#   drift-monitor    (fraud-detection-drift-monitor)
+#     Out-of-band container image — built+pushed via CodeBuild and deployed
+#     by scripts/deploy_lambda_container.sh, invoked from notebook 3
+#     Section 7.2. Runs Evidently data + model drift on a daily EventBridge
+#     schedule; SQS-sends the result for monitoring-writer to persist.
+lambda:
+  exec_role: ""                  # ARN of the Lambda execution role
+
+# ---------------------------------------------------------------------------
+# Data file paths
+# ---------------------------------------------------------------------------
+# Training data is downloaded at runtime by src/setup/download_dataset.py —
+# the local CSVs below are NOT in the repo and only materialize if you run
+# that script.
+#
+# Drifted data is generated at runtime by src/drift_monitoring/generate_drift_dataset.py
+# (see drift_generation block further down) and written to
+# data/drifted_data.csv.
+#
+# Ground truth is generated at runtime by
+# src/drift_monitoring/simulate_ground_truth_from_athena.py (notebook 3
+# Section 4) and written directly to the ground_truth_updates Athena table —
+# no local CSV.
+#
+# Pipeline + Athena code use the S3 paths below, not the local files.
+data:
+  # CSV defaults referenced only by:
+  #   src/setup/setup_athena_tables.py (legacy bulk-load path)
+  #   src/train_pipeline/athena/data_migrator.py (one-off Athena bootstrap)
+  # The normal flow (notebook 1 → data download → train) never reads these.
+  csv_training_data: "data/bank_marketing_predictions_final.csv"
+  csv_ground_truth: "data/ground_truth.csv"
+  csv_drifted_data: "data/drifted_data.csv"
+  # S3 locations (populated automatically from bucket + prefix if left empty)
+  s3_training_data: ""
+  s3_ground_truth: ""
+  s3_drifted_data: ""
+
+# ---------------------------------------------------------------------------
+# Preprocessing (used by src/setup/prepare_dataset.py)
+# ---------------------------------------------------------------------------
+# Config-driven preprocessing: transforms a raw CSV into the pipeline-ready
+# format. BYO-dataset users update this section — no code changes needed.
+#
+# Default below: UCI Bank Marketing dataset (bank-additional-full.csv).
+preprocessing:
+  # Path to the raw input CSV (relative to project root)
+  raw_input_csv: "data/raw/bank-additional-full.csv"
+
+  # Column renaming: raw_source_name → schema_name
+  # Applied before any other transformation.
+  column_rename_map:
+    "default": "credit_default"
+    "emp.var.rate": "emp_var_rate"
+    "cons.price.idx": "cons_price_idx"
+    "cons.conf.idx": "cons_conf_idx"
+    "nr.employed": "nr_employed"
+
+  # Categorical columns to label-encode (use schema-side names, i.e. AFTER rename).
+  # Each column's unique string values are mapped to integers 0..N-1.
+  categorical_columns:
+    - job
+    - marital
+    - education
+    - credit_default
+    - housing
+    - loan
+    - contact
+    - month
+    - day_of_week
+    - poutcome
+
+  # Target column transformation.
+  # source_column: the raw column name that contains the label.
+  # positive_value: the string value that maps to True (all others → False).
+  target_transform:
+    source_column: "y"
+    positive_value: "yes"
+
+  # Identifier column generation (if not present in raw data).
+  identifier:
+    generate: true
+    prefix: "bm-"
+
+  # Timestamp column generation (if not present in raw data).
+  timestamp:
+    generate: true
+    lookback_days: 730          # random timestamps within last N days
+
+  # Synthetic prediction/probability columns (for pipeline seeding).
+  predictions:
+    generate: true
+    positive_probability_low: 0.50
+    positive_probability_high: 0.99
+    negative_probability_low: 0.01
+    negative_probability_high: 0.40
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+# Target column, feature list, and column-rename map live in code, not here —
+# changing them requires updating preprocessing + the training pipeline:
+#   - target_column / features → src/config/dataset_schema.yaml (read via
+#     src.config.schema.target_column() / schema.feature_names())
+#   - Dataset download/transform → src/setup/download_dataset.py
+# Only XGBoost hyperparameters live in this section because they're tunable
+# without re-deriving the dataset.
+# For BYO datasets: place your pre-processed CSV in data/, update
+# `data.csv_training_data` above, and run `python -m src.setup.upload_data_to_s3`.
+training:
+  random_state: 42
+  # XGBoost hyperparameters. Tuning depends on class balance in YOUR dataset.
+  # For the Bank Marketing dataset (class ratio ~8:1), moderate regularization
+  # and early stopping prevent overfitting the minority class.
+  xgboost_params:
+    max_depth: 5
+    learning_rate: 0.1
+    num_boost_round: 200            # ceiling; early stopping typically halts sooner
+    min_child_weight: 6
+    early_stopping_rounds: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    gamma: 0.1
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    eval_metric: "auc"
+
+  # ------------------------------------------------------------------
+  # XGBoost objective override (BYO-dataset knob)
+  # ------------------------------------------------------------------
+  # Leave `objective` empty to auto-derive from schema.target_type():
+  #   boolean → 'binary:logistic' with scale_pos_weight class-imbalance handling
+  #   integer → 'multi:softprob' (also set num_class below)
+  #   double  → 'reg:squarederror' (regression; disables scale_pos_weight)
+  # Explicit override wins — set this if your target's XGBoost objective isn't
+  # covered by the auto-map (e.g. 'reg:logistic', 'multi:softmax',
+  # 'binary:hinge', 'rank:pairwise').
+  objective: ""
+  # Only used when objective is 'multi:softprob' or 'multi:softmax'. Number of
+  # distinct classes in your target column. Required for multi-class; unused
+  # otherwise.
+  num_class: 0
+
+# ---------------------------------------------------------------------------
+# Drift detection thresholds
+# ---------------------------------------------------------------------------
+# Read into config.py as MIN_ROC_AUC_THRESHOLD / DATA_DRIFT_THRESHOLD /
+# MODEL_DRIFT_THRESHOLD. Consumers:
+#   - src/drift_monitoring/monitor_model_performance.py (in-notebook drift run)
+#   - notebook 3 Section 6.5 (alert summary) + Section 7.1 (deploy banner)
+#
+# NOT read by the daily fraud-detection-drift-monitor Lambda — that one
+# reads its thresholds (DATA_DRIFT_THRESHOLD, KS_PVALUE_THRESHOLD,
+# MODEL_DRIFT_THRESHOLD, DATA_DRIFT_LOOKBACK_DAYS, MODEL_DRIFT_LOOKBACK_DAYS)
+# from its own Lambda env vars set by scripts/deploy_lambda_container.sh.
+# To tune the deployed Lambda, redeploy with new env vars; this YAML only
+# affects in-notebook checks.
+drift_thresholds:
+  # Minimum acceptable ROC-AUC before alerting (monitor_model_performance.py)
+  min_roc_auc: 0.85
+  # Data-drift alarm: fraction of features whose distribution moved
+  # (Evidently DataDriftPreset). 0.2 = alert if 20% of features drifted.
+  data_drift: 0.20
+  # Model-drift alarm: relative ROC-AUC degradation vs the baseline.
+  # 0.05 = alert if AUC drops by 5 percentage points or more.
+  model_drift: 0.05
+
+# Schedule for the daily drift-monitor Lambda (EventBridge cron expression).
+# Read by notebook 3 Section 7.1 as DRIFT_MONITOR_SCHEDULE for display. The
+# actual EventBridge rule is created by scripts/deploy_lambda_container.sh
+# which reads its own EVENTBRIDGE_SCHEDULE env var (same default), so to
+# truly override the schedule both this value AND that env var must change.
+drift_monitor:
+  schedule: "cron(0 2 * * ? *)"  # Daily at 2 AM UTC
+
+# ---------------------------------------------------------------------------
+# Drift dataset generation (for testing the monitoring pipeline)
+# ---------------------------------------------------------------------------
+# Used by src/drift_monitoring/generate_drift_dataset.py to fabricate a
+# drifted CSV that exercises the drift detector. One scenario only —
+# easier to explain in monitoring outputs.
+#
+# Drift types:
+#   multiplicative: new_value = original × (factor ± noise × factor)
+#   additive:       new_value = original + (shift ± noise)
+drift_generation:
+  num_samples: 5000
+  random_state: 123
+
+  # Drift applied to key features (Bank Marketing dataset)
+  default_drift:
+    age:
+      type: "additive"
+      shift: 5
+      noise: 2
+    duration:
+      type: "multiplicative"
+      factor: 1.3
+      noise: 0.1
+    campaign:
+      type: "additive"
+      shift: 2
+      noise: 1
+    euribor3m:
+      type: "additive"
+      shift: 0.5
+      noise: 0.2
+    nr_employed:
+      type: "additive"
+      shift: -50
+      noise: 20
+
+# QuickSight resource IDs (datasource/dataset/analysis/dashboard) and the
+# QuickSight service-role name are constants in src/config/config.py
+# (QUICKSIGHT_*). They are NOT duplicated in this YAML because they should
+# be stable across environments — changing them would orphan existing
+# datasets/dashboards.
+
+# ---------------------------------------------------------------------------
+# SHAP explainability
+# ---------------------------------------------------------------------------
+shap:
+  background_samples: 500
+  max_display_features: 20
+  check_additivity: false
+  random_state: 42
+  output_dir: "shap_output/"

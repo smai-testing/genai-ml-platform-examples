@@ -1,0 +1,767 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Lab 2 data-prep infrastructure: Glue/Athena Iceberg tables (training_data,
+  evaluation_data) in the default catalog, an S3 Table Bucket with the same
+  tables, and the EMR Serverless (2C) and EMR on EC2 (2D) IAM/app resources.
+  The stack owns the schemas; the Lab 2 notebooks write the data.
+
+# ===========================================================================
+# Parameters
+# ===========================================================================
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'bank-marketing-prediction'
+    Description: 'Must match the ProjectName used in the main workshop stack.'
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: 'ProjectName must contain only lowercase letters, numbers, and hyphens'
+
+  DataBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      S3 bucket for Athena query results and Iceberg table data. Leave blank to
+      use the account/region SageMaker default bucket (sagemaker-REGION-ACCOUNTID),
+      which is what the Lab 2 notebooks use via sagemaker_session.default_bucket().
+      Override only if your Lab 2 notebooks write to a different bucket.
+
+  AthenaDatabase:
+    Type: String
+    Default: 'bank_marketing'
+    Description: >-
+      Glue/Athena database that holds the bank-marketing Iceberg tables. Shared
+      with 4-inference-capture.yaml. This stack creates it if absent. Use
+      underscores (Athena Iceberg friendly), not hyphens.
+    AllowedPattern: '^[a-z0-9_]+$'
+    ConstraintDescription: 'Database name must contain only lowercase letters, numbers, and underscores'
+
+  TrainingTableName:
+    Type: String
+    Default: 'training_data'
+    Description: 'Athena Iceberg table holding the training split (data-drift baseline).'
+    AllowedPattern: '^[a-z0-9_]+$'
+
+  EvaluationTableName:
+    Type: String
+    Default: 'evaluation_data'
+    Description: 'Athena Iceberg table holding the held-out evaluation split (model-drift baseline).'
+    AllowedPattern: '^[a-z0-9_]+$'
+
+  TableBucketName:
+    Type: String
+    Default: ''
+    Description: >-
+      Name of the S3 Table Bucket (managed Iceberg layer). Leave blank to derive
+      PROJECTNAME-monitoring-ACCOUNTID. Lowercase, numbers, hyphens; 3-63 chars.
+
+  S3TablesNamespace:
+    Type: String
+    Default: 'bank_marketing'
+    Description: 'Namespace (logical grouping) for the tables in the S3 Table Bucket.'
+    AllowedPattern: '^[a-z0-9_]+$'
+
+  EMRReleaseLabel:
+    Type: String
+    Default: 'emr-7.5.0'
+    Description: 'EMR release used by the EMR Serverless application (Lab 2C) and EMR on EC2 clusters (Lab 2D).'
+
+  ResourceSuffix:
+    Type: String
+    Default: ''
+    Description: >-
+      Suffix appended to the SageMaker execution role names in 2-iam.yaml
+      (PROJECTNAME-{product,usera,userb}-role-SUFFIX). These roles RUN the Lab 2
+      notebooks (call PyIceberg overwrite()) and are granted Lake Formation
+      ALTER/INSERT/DESCRIBE/DELETE/SELECT on the Iceberg tables so the write
+      commit (Glue UpdateTable) is authorized. Leave blank if the roles have no
+      suffix (names end in "-role"). Must match the ResourceSuffix used in 2-iam.yaml.
+
+  CreateGlueDatabase:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether this stack creates the Glue/Athena database (AthenaDatabase).
+      Set 'false' when another stack already owns it (e.g. when deployed via
+      main.yaml, the InferenceCaptureStack creates 'bank_marketing' first, so
+      this stack reuses it to avoid an "already exists" collision).
+
+  EnableLakeFormationGrants:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Whether this stack creates AWS::LakeFormation::PrincipalPermissions grants
+      for the table-creator Lambda and the notebook execution roles. Creating
+      these grants requires the CloudFormation execution role to be a Lake
+      Formation Data Lake Admin. Leave 'false' when the account's LF
+      CreateDatabase/CreateTable default permissions include
+      IAM_ALLOWED_PRINCIPALS (scripts/deploy-workshop.sh ensures this), so IAM
+      Glue permissions govern the tables and explicit grants are unnecessary.
+      Set 'true' only when deploying as an LF admin that wants strict,
+      per-principal grants.
+
+Conditions:
+  DeriveBucketName: !Equals [!Ref DataBucketName, '']
+  DeriveTableBucketName: !Equals [!Ref TableBucketName, '']
+  HasResourceSuffix: !Not [!Equals [!Ref ResourceSuffix, '']]
+  ShouldCreateGlueDatabase: !Equals [!Ref CreateGlueDatabase, 'true']
+  ShouldCreateLFGrants: !Equals [!Ref EnableLakeFormationGrants, 'true']
+
+Resources:
+  # =========================================================================
+  # Glue database for the Iceberg data-prep tables
+  # Shared with 4-inference-capture.yaml. If that stack already created it,
+  # deploy this one with a different AthenaDatabase or after removing the
+  # duplicate — Glue database names are unique per account/region.
+  # =========================================================================
+  DataPrepGlueDatabase:
+    Type: AWS::Glue::Database
+    Condition: ShouldCreateGlueDatabase
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref AthenaDatabase
+        Description: 'Bank-marketing Iceberg tables for Lab 2 data prep / Lab 5 monitoring'
+        LocationUri: !If
+          - DeriveBucketName
+          - !Sub 's3://sagemaker-${AWS::Region}-${AWS::AccountId}/bank-marketing-lab/iceberg/'
+          - !Sub 's3://${DataBucketName}/bank-marketing-lab/iceberg/'
+
+  # =========================================================================
+  # Lake Formation grants for the table-creator Lambda role
+  # This account has Lake Formation managing the Glue Data Catalog, so IAM
+  # permissions alone are not enough — without these grants the Athena DDL
+  # fails with "Insufficient Lake Formation permission(s): Required Describe".
+  # The CloudFormation execution role must be a Lake Formation Data Lake Admin
+  # for these grants to succeed (it grants on behalf of the stack).
+  # =========================================================================
+  TableCreatorDatabasePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !GetAtt TableCreatorRole.Arn
+      Resource:
+        Database:
+          CatalogId: !Ref AWS::AccountId
+          Name: !Ref AthenaDatabase
+      Permissions:
+        - CREATE_TABLE
+        - DESCRIBE
+        - ALTER
+        - DROP
+      PermissionsWithGrantOption: []
+
+  TableCreatorTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !GetAtt TableCreatorRole.Arn
+      Resource:
+        Table:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref AthenaDatabase
+          TableWildcard: {}
+      Permissions:
+        - DESCRIBE
+        - SELECT
+        - INSERT
+        - DELETE
+        - ALTER
+        - DROP
+      PermissionsWithGrantOption: []
+
+  # =========================================================================
+  # Lake Formation grants for the notebook (SageMaker execution) roles
+  # The Lab 2 notebooks run as the product/usera/userb SageMaker roles and call
+  # PyIceberg overwrite(), which commits via Glue UpdateTable. Lake Formation
+  # gates that behind ALTER on the table, so without these grants the write
+  # fails with "Insufficient Lake Formation permission(s): Required Alter".
+  # Database DESCRIBE lets the role resolve the table; the table grant covers
+  # the overwrite (ALTER metadata + DELETE existing rows + INSERT new rows).
+  # Role names mirror 2-iam.yaml: PROJECTNAME-{product,usera,userb}-role[-SUFFIX].
+  # =========================================================================
+  NotebookProductDatabasePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-product-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-product-role'
+      Resource:
+        Database:
+          CatalogId: !Ref AWS::AccountId
+          Name: !Ref AthenaDatabase
+      Permissions: [DESCRIBE]
+      PermissionsWithGrantOption: []
+
+  NotebookProductTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-product-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-product-role'
+      Resource:
+        Table:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref AthenaDatabase
+          TableWildcard: {}
+      Permissions: [DESCRIBE, SELECT, INSERT, DELETE, ALTER]
+      PermissionsWithGrantOption: []
+
+  NotebookUserADatabasePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-usera-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-usera-role'
+      Resource:
+        Database:
+          CatalogId: !Ref AWS::AccountId
+          Name: !Ref AthenaDatabase
+      Permissions: [DESCRIBE]
+      PermissionsWithGrantOption: []
+
+  NotebookUserATablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-usera-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-usera-role'
+      Resource:
+        Table:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref AthenaDatabase
+          TableWildcard: {}
+      Permissions: [DESCRIBE, SELECT, INSERT, DELETE, ALTER]
+      PermissionsWithGrantOption: []
+
+  NotebookUserBDatabasePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-userb-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-userb-role'
+      Resource:
+        Database:
+          CatalogId: !Ref AWS::AccountId
+          Name: !Ref AthenaDatabase
+      Permissions: [DESCRIBE]
+      PermissionsWithGrantOption: []
+
+  NotebookUserBTablePermissions:
+    Type: AWS::LakeFormation::PrincipalPermissions
+    Condition: ShouldCreateLFGrants
+    Properties:
+      Principal:
+        DataLakePrincipalIdentifier: !If
+          - HasResourceSuffix
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-userb-role-${ResourceSuffix}'
+          - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-userb-role'
+      Resource:
+        Table:
+          CatalogId: !Ref AWS::AccountId
+          DatabaseName: !Ref AthenaDatabase
+          TableWildcard: {}
+      Permissions: [DESCRIBE, SELECT, INSERT, DELETE, ALTER]
+      PermissionsWithGrantOption: []
+
+  # =========================================================================
+  # Custom-resource Lambda — creates the Iceberg tables via Athena DDL
+  # =========================================================================
+  TableCreatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-data-prep-table-creator-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/AmazonAthenaFullAccess'
+      Policies:
+        - PolicyName: S3AndGlueAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: !If
+                  - DeriveBucketName
+                  - - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}'
+                    - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*'
+                  - - !Sub 'arn:aws:s3:::${DataBucketName}'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:CreateTable'
+                  - 'glue:UpdateTable'
+                  - 'glue:DeleteTable'
+                Resource: '*'
+
+  TableCreatorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-data-prep-table-creator'
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 300
+      Role: !GetAtt TableCreatorRole.Arn
+      Description: 'Creates the Lab 2 data-prep Iceberg tables (training_data, evaluation_data) via Athena DDL.'
+      Environment:
+        Variables:
+          ATHENA_DATABASE: !Ref AthenaDatabase
+          TRAINING_TABLE: !Ref TrainingTableName
+          EVALUATION_TABLE: !Ref EvaluationTableName
+          TRAINING_LOCATION: !If
+            - DeriveBucketName
+            - !Sub 's3://sagemaker-${AWS::Region}-${AWS::AccountId}/bank-marketing-lab/iceberg/${TrainingTableName}/'
+            - !Sub 's3://${DataBucketName}/bank-marketing-lab/iceberg/${TrainingTableName}/'
+          EVALUATION_LOCATION: !If
+            - DeriveBucketName
+            - !Sub 's3://sagemaker-${AWS::Region}-${AWS::AccountId}/bank-marketing-lab/iceberg/${EvaluationTableName}/'
+            - !Sub 's3://${DataBucketName}/bank-marketing-lab/iceberg/${EvaluationTableName}/'
+          ATHENA_OUTPUT_S3: !If
+            - DeriveBucketName
+            - !Sub 's3://sagemaker-${AWS::Region}-${AWS::AccountId}/athena-query-results/'
+            - !Sub 's3://${DataBucketName}/athena-query-results/'
+      Code:
+        ZipFile: |
+          import os
+          import time
+          import boto3
+          import cfnresponse
+
+          athena = boto3.client('athena')
+          DATABASE = os.environ['ATHENA_DATABASE']
+          TRAINING_TABLE = os.environ['TRAINING_TABLE']
+          EVALUATION_TABLE = os.environ['EVALUATION_TABLE']
+          TRAINING_LOCATION = os.environ['TRAINING_LOCATION']
+          EVALUATION_LOCATION = os.environ['EVALUATION_LOCATION']
+          ATHENA_OUTPUT_S3 = os.environ['ATHENA_OUTPUT_S3']
+
+          # Schema matches lab5-monitoring/src/config/dataset_schema.yaml:
+          #   identifier + 20 features + timestamp + auxiliary + target.
+          # The Lab 2 registration notebook OVERWRITEs these tables with data
+          # using the identical column layout.
+          def ddl(table, location):
+              return f"""
+                  CREATE TABLE IF NOT EXISTS {DATABASE}.{table} (
+                      client_id STRING,
+                      age DOUBLE,
+                      job DOUBLE,
+                      marital DOUBLE,
+                      education DOUBLE,
+                      credit_default DOUBLE,
+                      housing DOUBLE,
+                      loan DOUBLE,
+                      contact DOUBLE,
+                      month DOUBLE,
+                      day_of_week DOUBLE,
+                      duration DOUBLE,
+                      campaign DOUBLE,
+                      pdays DOUBLE,
+                      previous DOUBLE,
+                      poutcome DOUBLE,
+                      emp_var_rate DOUBLE,
+                      cons_price_idx DOUBLE,
+                      cons_conf_idx DOUBLE,
+                      euribor3m DOUBLE,
+                      nr_employed DOUBLE,
+                      contact_timestamp TIMESTAMP,
+                      prediction BOOLEAN,
+                      probability_positive DOUBLE,
+                      subscribed BOOLEAN
+                  )
+                  LOCATION '{location}'
+                  TBLPROPERTIES ('table_type' = 'ICEBERG')
+              """
+
+          def run_query(sql):
+              resp = athena.start_query_execution(
+                  QueryString=sql,
+                  QueryExecutionContext={'Database': DATABASE},
+                  ResultConfiguration={'OutputLocation': ATHENA_OUTPUT_S3},
+              )
+              qid = resp['QueryExecutionId']
+              while True:
+                  status = athena.get_query_execution(QueryExecutionId=qid)
+                  state = status['QueryExecution']['Status']['State']
+                  if state in ('SUCCEEDED', 'FAILED', 'CANCELLED'):
+                      break
+                  time.sleep(2)
+              if state != 'SUCCEEDED':
+                  reason = status['QueryExecution']['Status'].get('StateChangeReason', 'Unknown')
+                  raise Exception(f'Query failed ({state}): {reason}')
+
+          def handler(event, context):
+              try:
+                  # Never drop the tables on delete — prepared data is preserved.
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  print(f'Creating Iceberg table {DATABASE}.{TRAINING_TABLE}...')
+                  run_query(ddl(TRAINING_TABLE, TRAINING_LOCATION))
+                  print(f'Creating Iceberg table {DATABASE}.{EVALUATION_TABLE}...')
+                  run_query(ddl(EVALUATION_TABLE, EVALUATION_LOCATION))
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'TrainingTable': f'{DATABASE}.{TRAINING_TABLE}',
+                      'EvaluationTable': f'{DATABASE}.{EVALUATION_TABLE}',
+                  })
+              except Exception as e:
+                  print(f'Error: {e}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  DataPrepTables:
+    Type: Custom::AthenaIcebergTables
+    Properties:
+      ServiceToken: !GetAtt TableCreatorFunction.Arn
+      # Referencing the database name (only when this stack creates it) forces
+      # CloudFormation to create DataPrepGlueDatabase before this custom
+      # resource runs the CREATE TABLE DDL. When CreateGlueDatabase=false the
+      # database is owned by another stack that is ordered earlier (main.yaml
+      # deploys InferenceCaptureStack before DataPrepStack).
+      DatabaseDependency: !If
+        - ShouldCreateGlueDatabase
+        - !Ref DataPrepGlueDatabase
+        - !Ref AthenaDatabase
+      # Bump this value to force the DDL to re-run on a stack update.
+      Version: '1'
+
+  # =========================================================================
+  # S3 Table Bucket (managed Iceberg layer)
+  # Native AWS::S3Tables::* resources — the table schemas are defined inline
+  # via IcebergMetadata, so no custom-resource Lambda is needed here. The Lab 2
+  # notebook OVERWRITEs these tables with the prepared rows.
+  # =========================================================================
+  DataPrepTableBucket:
+    Type: AWS::S3Tables::TableBucket
+    Properties:
+      TableBucketName: !If
+        - DeriveTableBucketName
+        - !Sub '${ProjectName}-monitoring-${AWS::AccountId}'
+        - !Ref TableBucketName
+
+  DataPrepTableNamespace:
+    Type: AWS::S3Tables::Namespace
+    Properties:
+      TableBucketARN: !GetAtt DataPrepTableBucket.TableBucketARN
+      Namespace: !Ref S3TablesNamespace
+
+  # Shared Iceberg schema for both tables. Matches the default-catalog DDL and
+  # lab5-monitoring/src/config/dataset_schema.yaml:
+  #   identifier + 20 features + timestamp + auxiliary + target.
+  S3TrainingTable:
+    Type: AWS::S3Tables::Table
+    DependsOn: DataPrepTableNamespace
+    Properties:
+      TableBucketARN: !GetAtt DataPrepTableBucket.TableBucketARN
+      Namespace: !Ref S3TablesNamespace
+      TableName: !Ref TrainingTableName
+      OpenTableFormat: ICEBERG
+      IcebergMetadata:
+        IcebergSchema:
+          SchemaFieldList:
+            - { Name: client_id, Type: string }
+            - { Name: age, Type: double }
+            - { Name: job, Type: double }
+            - { Name: marital, Type: double }
+            - { Name: education, Type: double }
+            - { Name: credit_default, Type: double }
+            - { Name: housing, Type: double }
+            - { Name: loan, Type: double }
+            - { Name: contact, Type: double }
+            - { Name: month, Type: double }
+            - { Name: day_of_week, Type: double }
+            - { Name: duration, Type: double }
+            - { Name: campaign, Type: double }
+            - { Name: pdays, Type: double }
+            - { Name: previous, Type: double }
+            - { Name: poutcome, Type: double }
+            - { Name: emp_var_rate, Type: double }
+            - { Name: cons_price_idx, Type: double }
+            - { Name: cons_conf_idx, Type: double }
+            - { Name: euribor3m, Type: double }
+            - { Name: nr_employed, Type: double }
+            - { Name: contact_timestamp, Type: timestamp }
+            - { Name: prediction, Type: boolean }
+            - { Name: probability_positive, Type: double }
+            - { Name: subscribed, Type: boolean }
+
+  S3EvaluationTable:
+    Type: AWS::S3Tables::Table
+    DependsOn: DataPrepTableNamespace
+    Properties:
+      TableBucketARN: !GetAtt DataPrepTableBucket.TableBucketARN
+      Namespace: !Ref S3TablesNamespace
+      TableName: !Ref EvaluationTableName
+      OpenTableFormat: ICEBERG
+      IcebergMetadata:
+        IcebergSchema:
+          SchemaFieldList:
+            - { Name: client_id, Type: string }
+            - { Name: age, Type: double }
+            - { Name: job, Type: double }
+            - { Name: marital, Type: double }
+            - { Name: education, Type: double }
+            - { Name: credit_default, Type: double }
+            - { Name: housing, Type: double }
+            - { Name: loan, Type: double }
+            - { Name: contact, Type: double }
+            - { Name: month, Type: double }
+            - { Name: day_of_week, Type: double }
+            - { Name: duration, Type: double }
+            - { Name: campaign, Type: double }
+            - { Name: pdays, Type: double }
+            - { Name: previous, Type: double }
+            - { Name: poutcome, Type: double }
+            - { Name: emp_var_rate, Type: double }
+            - { Name: cons_price_idx, Type: double }
+            - { Name: cons_conf_idx, Type: double }
+            - { Name: euribor3m, Type: double }
+            - { Name: nr_employed, Type: double }
+            - { Name: contact_timestamp, Type: timestamp }
+            - { Name: prediction, Type: boolean }
+            - { Name: probability_positive, Type: double }
+            - { Name: subscribed, Type: boolean }
+
+  # =========================================================================
+  # Lab 2C — EMR Serverless
+  # Pre-provisions the job runtime role and the Spark application so the
+  # notebook only has to submit a job run (start_job_run), not create infra.
+  # =========================================================================
+  EMRServerlessRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-emr-serverless-runtime-role'
+      Description: 'EMR Serverless job runtime role for the Lab 2C bank-marketing data prep.'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: emr-serverless.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: BankMarketingDataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                # Always include the SageMaker default bucket: Lab 2C stages the
+                # raw CSV, the Spark script, the job logs and the Spark output
+                # under sagemaker_session.default_bucket(), never under
+                # DataBucketName. Scoping this role to DataBucketName alone makes
+                # the job run fail with "not authorized to perform: s3:PutObject"
+                # on the log destination before Spark even starts.
+                Resource: !If
+                  - DeriveBucketName
+                  - - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}'
+                    - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*'
+                  - - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}'
+                    - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetDatabase'
+                  - 'glue:GetTable'
+                  - 'glue:GetPartitions'
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EMRServerlessApplication:
+    Type: AWS::EMRServerless::Application
+    Properties:
+      Name: !Sub '${ProjectName}-data-prep'
+      ReleaseLabel: !Ref EMRReleaseLabel
+      Type: SPARK
+      # Upper bound on what a runaway job can consume — not a reservation.
+      MaximumCapacity:
+        Cpu: '32 vCPU'
+        Memory: '128 GB'
+        Disk: '200 GB'
+      # Start on first job submission; stop after 15 min idle (pay-per-use).
+      AutoStartConfiguration:
+        Enabled: true
+      AutoStopConfiguration:
+        Enabled: true
+        IdleTimeoutMinutes: 15
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Lab 2D — EMR on EC2 service roles
+  # The transient cluster itself is created by the notebook (run_job_flow);
+  # these are the two account-level roles EMR requires. Equivalent to running
+  # "aws emr create-default-roles", but managed as code.
+  # =========================================================================
+  EMRServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-emr-service-role'
+      Description: 'EMR service role (Lab 2D) - EMR uses this to provision EC2 instances.'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEMRServicePolicy_v2'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EMREC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-emr-ec2-instance-role'
+      Description: 'EMR on EC2 instance role (Lab 2D) - the role the cluster nodes run under.'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role'
+      Policies:
+        - PolicyName: BankMarketingDataAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                # Same reason as EMRServerlessRuntimeRole above — Lab 2D's Spark
+                # step reads and writes under sagemaker_session.default_bucket().
+                Resource: !If
+                  - DeriveBucketName
+                  - - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}'
+                    - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*'
+                  - - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}'
+                    - !Sub 'arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}'
+                    - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EMREC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-emr-ec2-instance-role'
+      Roles:
+        - !Ref EMREC2InstanceRole
+
+# ===========================================================================
+# Outputs
+# ===========================================================================
+Outputs:
+  GlueDatabaseName:
+    Description: 'Glue/Athena database holding the data-prep Iceberg tables.'
+    Value: !Ref AthenaDatabase
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-database'
+
+  TrainingTableName:
+    Description: 'Athena Iceberg table for the training split.'
+    Value: !Sub '${AthenaDatabase}.${TrainingTableName}'
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-training-table'
+
+  EvaluationTableName:
+    Description: 'Athena Iceberg table for the evaluation split.'
+    Value: !Sub '${AthenaDatabase}.${EvaluationTableName}'
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-evaluation-table'
+
+  TableBucketArn:
+    Description: 'ARN of the S3 Table Bucket (managed Iceberg layer).'
+    Value: !GetAtt DataPrepTableBucket.TableBucketARN
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-table-bucket-arn'
+
+  TableBucketName:
+    Description: 'Name of the S3 Table Bucket.'
+    Value: !If
+      - DeriveTableBucketName
+      - !Sub '${ProjectName}-monitoring-${AWS::AccountId}'
+      - !Ref TableBucketName
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-table-bucket-name'
+
+  S3TablesNamespace:
+    Description: 'Namespace holding the tables in the S3 Table Bucket.'
+    Value: !Ref S3TablesNamespace
+    Export:
+      Name: !Sub '${ProjectName}-data-prep-s3tables-namespace'
+
+  # --- Lab 2C: EMR Serverless ---
+  EMRServerlessApplicationId:
+    Description: 'EMR Serverless application ID — the Lab 2C notebook submits job runs to this.'
+    Value: !Ref EMRServerlessApplication
+    Export:
+      Name: !Sub '${ProjectName}-emr-serverless-application-id'
+
+  EMRServerlessRuntimeRoleArn:
+    Description: 'EMR Serverless job runtime role ARN (executionRoleArn for start_job_run).'
+    Value: !GetAtt EMRServerlessRuntimeRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-emr-serverless-runtime-role-arn'
+
+  # --- Lab 2D: EMR on EC2 ---
+  EMRServiceRoleName:
+    Description: 'EMR service role name (ServiceRole for run_job_flow in Lab 2D).'
+    Value: !Ref EMRServiceRole
+    Export:
+      Name: !Sub '${ProjectName}-emr-service-role-name'
+
+  EMREC2InstanceProfileName:
+    Description: 'EMR on EC2 instance profile name (JobFlowRole for run_job_flow in Lab 2D).'
+    Value: !Ref EMREC2InstanceProfile
+    Export:
+      Name: !Sub '${ProjectName}-emr-ec2-instance-profile-name'
