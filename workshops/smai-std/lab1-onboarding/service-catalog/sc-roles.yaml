@@ -136,6 +136,200 @@ Resources:
         - !Ref UserBSageMakerExecutionRole
         - !Ref ProductSageMakerExecutionRole
 
+  # Glue + Athena + Lake Formation + S3 Tables access for the Lab 2 bank-marketing
+  # Iceberg tables. AmazonSageMakerFullAccess only covers sagemaker-named Glue/Athena
+  # resources, so the (non-sagemaker-named) bank_marketing database is otherwise
+  # denied. The Lab 2 iceberg write notebook and Lab 5 Athena queries need these.
+  # The Lab 2 notebooks use the SageMaker default bucket (sagemaker-<region>-<account>)
+  # for Athena results and Iceberg data.
+  DataPrepIcebergPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-data-prep-iceberg-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: GlueCatalogAccess
+            Effect: Allow
+            Action:
+              - glue:GetCatalog
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:CreateDatabase
+              - glue:GetTable
+              - glue:GetTables
+              - glue:CreateTable
+              - glue:UpdateTable
+              - glue:DeleteTable
+              - glue:GetPartition
+              - glue:GetPartitions
+              - glue:BatchGetPartition
+              - glue:CreatePartition
+              - glue:BatchCreatePartition
+              - glue:UpdatePartition
+              - glue:DeletePartition
+              - glue:BatchDeletePartition
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/bank_marketing"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/bank_marketing/*"
+          - Sid: AthenaQueryAccess
+            Effect: Allow
+            Action:
+              - athena:StartQueryExecution
+              - athena:StopQueryExecution
+              - athena:GetQueryExecution
+              - athena:GetQueryResults
+              - athena:GetQueryResultsStream
+              - athena:BatchGetQueryExecution
+              - athena:GetWorkGroup
+              - athena:GetDataCatalog
+              - athena:ListDataCatalogs
+              - athena:ListWorkGroups
+            Resource: "*"
+          - Sid: LakeFormationDataAccess
+            Effect: Allow
+            Action:
+              - lakeformation:GetDataAccess
+              - lakeformation:GrantPermissions
+              - lakeformation:RevokePermissions
+              - lakeformation:BatchGrantPermissions
+              - lakeformation:BatchRevokePermissions
+              - lakeformation:ListPermissions
+              - lakeformation:GetDataLakeSettings
+            Resource: "*"
+          - Sid: IcebergAndAthenaResultsS3
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+            Resource:
+              - !Sub "arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}"
+              - !Sub "arn:aws:s3:::sagemaker-${AWS::Region}-${AWS::AccountId}/*"
+          - Sid: S3TablesAccess
+            Effect: Allow
+            Action:
+              - s3tables:CreateTableBucket
+              - s3tables:GetTableBucket
+              - s3tables:GetTableBucketPolicy
+              - s3tables:PutTableBucketPolicy
+              - s3tables:PutTableBucketEncryption
+              - s3tables:TagResource
+              - s3tables:CreateNamespace
+              - s3tables:GetNamespace
+              - s3tables:ListNamespaces
+              - s3tables:CreateTable
+              - s3tables:GetTable
+              - s3tables:ListTables
+              - s3tables:PutTableData
+              - s3tables:GetTableData
+              - s3tables:GetTableMetadataLocation
+              - s3tables:UpdateTableMetadataLocation
+            Resource:
+              - !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+          - Sid: S3TablesListBuckets
+            Effect: Allow
+            Action:
+              - s3tables:ListTableBuckets
+            Resource:
+              - !Sub "arn:aws:s3tables:${AWS::Region}:${AWS::AccountId}:bucket/*"
+          - Sid: GlueS3TablesCatalogFederation
+            Effect: Allow
+            Action:
+              - glue:CreateCatalog
+              - glue:GetCatalog
+              - glue:GetDatabase
+              - glue:GetDatabases
+              - glue:CreateDatabase
+              - glue:UpdateDatabase
+              - glue:GetTable
+              - glue:GetTables
+              - glue:CreateTable
+              - glue:UpdateTable
+              - glue:DeleteTable
+            Resource:
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*/*"
+              - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*/*"
+      Roles:
+        - !Ref UserASageMakerExecutionRole
+        - !Ref UserBSageMakerExecutionRole
+        - !Ref ProductSageMakerExecutionRole
+
+  # EMR Serverless (Lab 2C) + EMR on EC2 (Lab 2D) access. The EMR applications and
+  # execution roles are pre-provisioned by 5-data-prep.yaml; these permissions let
+  # the notebooks LIST/SUBMIT/MONITOR jobs and PassRole the pre-provisioned EMR roles.
+  EMRDataPrepPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-emr-data-prep-policy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EMRServerlessList
+            Effect: Allow
+            Action:
+              - emr-serverless:ListApplications
+            Resource: "*"
+          - Sid: EMRServerlessAppAndJobs
+            Effect: Allow
+            Action:
+              - emr-serverless:GetApplication
+              - emr-serverless:StartApplication
+              - emr-serverless:StopApplication
+              - emr-serverless:StartJobRun
+              - emr-serverless:GetJobRun
+              - emr-serverless:ListJobRuns
+              - emr-serverless:CancelJobRun
+              - emr-serverless:GetDashboardForJobRun
+            Resource:
+              - !Sub "arn:aws:emr-serverless:${AWS::Region}:${AWS::AccountId}:/applications/*"
+          - Sid: EMROnEC2ClusterManagement
+            Effect: Allow
+            Action:
+              - elasticmapreduce:RunJobFlow
+              - elasticmapreduce:DescribeCluster
+              - elasticmapreduce:ListClusters
+              - elasticmapreduce:ListInstances
+              - elasticmapreduce:ListSteps
+              - elasticmapreduce:DescribeStep
+              - elasticmapreduce:AddJobFlowSteps
+              - elasticmapreduce:TerminateJobFlows
+              - elasticmapreduce:AddTags
+            Resource: "*"
+          - Sid: EC2ReadForEMR
+            Effect: Allow
+            Action:
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ec2:DescribeAvailabilityZones
+            Resource: "*"
+          - Sid: PassEMRRoles
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-emr-serverless-runtime-role"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-emr-service-role"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-emr-ec2-instance-role"
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - emr-serverless.amazonaws.com
+                  - elasticmapreduce.amazonaws.com
+                  - ec2.amazonaws.com
+      Roles:
+        - !Ref UserASageMakerExecutionRole
+        - !Ref UserBSageMakerExecutionRole
+        - !Ref ProductSageMakerExecutionRole
+
 Outputs:
   ProductRoleArn:
     Value: !GetAtt ProductSageMakerExecutionRole.Arn

@@ -143,7 +143,7 @@ Replace `<YOUR_PROJECT_NAME>` with a lowercase, hyphenated name (e.g., `bank-mar
 | `ProjectName` | `bank-marketing-prediction` | Used to name all resources; lowercase letters, digits, hyphens only |
 | `S3TemplateBucket` | *(required)* | Bucket holding the five child templates |
 | `S3TemplateKeyPrefix` | `genai-ml-std-assets` | Key prefix the child templates live under |
-| `SeedCodeType` | `llm-fine-tuning` | `classification`, `llm-fine-tuning`, or `regression` |
+| `SeedCodeType` | `llm-fine-tuning` | `classification` or `llm-fine-tuning` |
 | `VpcCIDR` | `10.1.0.0/16` | VPC CIDR block |
 | `PrivateSubnetCIDR` | `10.1.1.0/24` | Private subnet 1 |
 | `PrivateSubnet2CIDR` | `10.1.2.0/24` | Private subnet 2 |
@@ -220,8 +220,11 @@ Re-running `./scripts/deploy-workshop.sh` does the same thing — it detects the
 regardless of how the subscription happened and sets the parameter itself — but it redeploys
 every nested stack, so prefer the targeted update once the workshop is running. Where you cannot
 update the stack at all, attach the two `PolicyDocument` blocks from `templates/2-iam.yaml`
-directly with `aws iam put-role-policy`, using exactly the names `QuickSightS3DataLakeAccess` and
-`QuickSightAthenaAccess` — `create_governance_dashboard.py` matches them by name.
+directly with `aws iam put-role-policy`, using the project-scoped names
+`${ProjectName}-QuickSightS3DataLakeAccess` and `${ProjectName}-QuickSightAthenaAccess` — these are
+project-scoped so multiple projects can share the account-global QuickSight service role, and
+`create_governance_dashboard.py` matches them by name (via `config.QUICKSIGHT_S3_POLICY_NAME` /
+`QUICKSIGHT_ATHENA_POLICY_NAME`).
 
 **Automating both halves instead.** For provisioning accounts in bulk rather than teaching from
 them, the deploy script folds the whole thing into one run:

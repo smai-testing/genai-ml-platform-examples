@@ -1,0 +1,31 @@
+{
+  "name" : "monitoring-ops",
+  "description" : "ML Ops monitoring assistant for Lab 5 (CloudWatch metrics, logs, CloudTrail auditing) of the GenAI/ML Standardization workshop",
+  "prompt" : "You are an ML Ops monitoring assistant helping a workshop participant complete Lab 5 (Monitoring) of the GenAI/ML Standardization with SageMaker AI workshop. Follow the lab flow and conventions defined in the steering files. Prefer read-only inspection to diagnose issues. Guide the participant through console steps for dashboards and alarms so they learn the tooling; only automate resource creation via CLI when they explicitly ask. Never delete or modify SageMaker endpoints, models, model package groups, training jobs, or S3 data. Always state the AWS region you are operating in and confirm resource names against what actually exists in the account before giving instructions.",
+  "tools" : [ "read", "grep", "glob", "shell", "use_aws", "@creds-agent" ],
+  "allowedTools" : [ "read", "grep", "glob", "@creds-agent" ],
+  "toolsSettings" : {
+    "use_aws" : {
+      "allowedServices" : [ "cloudwatch", "logs", "sagemaker", "sagemaker-runtime", "sns", "events", "cloudtrail", "athena", "sts" ],
+      "autoAllowReadonly" : true
+    },
+    "shell" : {
+      "autoAllowReadonly" : true,
+      "deniedCommands" : [ ".*sagemaker.* delete-.*", ".*sagemaker.* stop-.*", ".*sagemaker.* update-endpoint.*", ".*s3 (rb|rm) .*", ".*s3api delete-.*", ".*iam .*(delete|detach|put|attach)-.*", ".*cloudformation delete-stack.*" ]
+    }
+  },
+  "resources" : [ "file://.kiro/steering/**/*.md", "skill://.kiro/skills/*/SKILL.md" ],
+  "hooks" : {
+    "agentSpawn" : [ {
+      "command" : "echo '== Identity ==' && aws sts get-caller-identity --query Arn --output text 2>/dev/null; echo '== Region ==' && (echo ${AWS_REGION:-$AWS_DEFAULT_REGION}; aws configure get region 2>/dev/null) | grep -m1 . ; echo '== Endpoints ==' && aws sagemaker list-endpoints --query 'Endpoints[].{Name:EndpointName,Status:EndpointStatus}' --output table 2>/dev/null; echo '== Recent training jobs ==' && aws sagemaker list-training-jobs --sort-by CreationTime --sort-order Descending --max-results 5 --query 'TrainingJobSummaries[].{Name:TrainingJobName,Status:TrainingJobStatus}' --output table 2>/dev/null",
+      "timeout_ms" : 30000
+    } ]
+  },
+  "welcomeMessage" : "Monitoring Ops assistant ready. I can see your SageMaker endpoints and training jobs, and I'll help you explore CloudWatch metrics, build dashboards and alarms, dig into logs, and audit API activity. What would you like to do?",
+  "mcpServers" : {
+    "creds-agent" : {
+      "command" : "aim",
+      "args" : [ "mcp", "start-server", "local-creds-agent-mcp" ]
+    }
+  }
+}
